@@ -22,7 +22,7 @@ from app.models import (
     SyncRun,
     utcnow,
 )
-from app.schemas import BasketScoreResult, PicnicSearchItemOut, ScoringTargets
+from app.schemas import BasketScoreResult, DeliverySlotOut, PicnicSearchItemOut, ScoringTargets
 from app.services.demo_data import (
     DEMO_INITIAL_CART,
     DEMO_PRODUCT_MAP,
@@ -40,6 +40,7 @@ from app.services.settings_store import (
     KEY_PICNIC_AUTH_STATUS,
     KEY_PICNIC_AUTH_TOKEN,
     KEY_PICNIC_COUNTRY_CODE,
+    KEY_PICNIC_DELIVERY_SLOTS_JSON,
     KEY_PICNIC_USERNAME,
     delete_setting,
     get_effective_scoring_targets,
@@ -548,6 +549,45 @@ def clear_demo_data(db: Session) -> dict[str, int]:
     }
 
 
+def get_cached_delivery_slots(db: Session) -> list[DeliverySlotOut]:
+    """Return cached upcoming delivery slots (selected first or chronological)."""
+    raw = get_setting(db, KEY_PICNIC_DELIVERY_SLOTS_JSON, "")
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            return []
+    except Exception:
+        return []
+
+    now = utcnow()
+    out: list[DeliverySlotOut] = []
+    for entry in items:
+        if not isinstance(entry, dict) or not entry.get("window_start"):
+            continue
+        start_dt = _parse_iso_datetime(str(entry["window_start"]))
+        if start_dt is None:
+            continue
+        end_dt = _parse_iso_datetime(entry.get("window_end"))
+        cutoff_dt = _parse_iso_datetime(entry.get("cut_off_time"))
+        # Skip expired slots (allow small 1h grace window)
+        if _as_utc(end_dt or start_dt) < now - timedelta(hours=1):
+            continue
+        out.append(
+            DeliverySlotOut(
+                slot_id=str(entry.get("slot_id") or ""),
+                window_start=start_dt,
+                window_end=end_dt,
+                cut_off_time=cutoff_dt,
+                is_available=bool(entry.get("is_available", True)),
+                selected=bool(entry.get("selected", False)),
+            )
+        )
+    out.sort(key=lambda s: _as_utc(s.window_start))
+    return out[:6]
+
+
 def _save_demo_cart(db: Session, items: list[tuple[str, int]]) -> CartSnapshot:
     serialized: list[dict[str, Any]] = []
     total_price = 0
@@ -578,9 +618,37 @@ def _save_demo_cart(db: Session, items: list[tuple[str, int]]) -> CartSnapshot:
 
     targets = ScoringTargets(**get_effective_scoring_targets(db))
     metrics = score_basket(scorable, targets=targets)
-    next_slot = (utcnow() + timedelta(days=2)).replace(hour=16, minute=0, second=0, microsecond=0)
+    now = utcnow()
+    demo_slot_specs = [
+        (1, 18, False),
+        (2, 16, True),
+        (3, 10, False),
+        (4, 17, False),
+    ]
+    demo_slots_payload = []
+    next_slot = (now + timedelta(days=2)).replace(hour=16, minute=0, second=0, microsecond=0)
+    for idx_s, (days_ahead, hour, is_sel) in enumerate(demo_slot_specs, start=1):
+        start_dt = (now + timedelta(days=days_ahead)).replace(
+            hour=hour, minute=0, second=0, microsecond=0
+        )
+        end_dt = start_dt + timedelta(hours=1)
+        cutoff_dt = (start_dt - timedelta(days=1)).replace(hour=22, minute=0)
+        if is_sel:
+            next_slot = start_dt
+        demo_slots_payload.append(
+            {
+                "slot_id": f"demo-slot-{idx_s}",
+                "window_start": start_dt.isoformat(),
+                "window_end": end_dt.isoformat(),
+                "cut_off_time": cutoff_dt.isoformat(),
+                "is_available": True,
+                "selected": is_sel,
+            }
+        )
+    set_setting(db, KEY_PICNIC_DELIVERY_SLOTS_JSON, json.dumps(demo_slots_payload))
+
     snap = CartSnapshot(
-        fetched_at=utcnow(),
+        fetched_at=now,
         total_price_cents=total_price,
         item_count=total_count,
         next_slot_start=next_slot,
@@ -639,13 +707,38 @@ def _extract_cart_snapshot(db: Session, cart: Any) -> CartSnapshot:
     next_slot_dt: datetime | None = None
     selected_slot = getattr(cart, "selected_slot", None)
     selected_slot_id = getattr(selected_slot, "slot_id", None) if selected_slot else None
+    parsed_slots: list[dict[str, Any]] = []
+
     for slot in getattr(cart, "delivery_slots", None) or []:
-        if selected_slot_id and getattr(slot, "slot_id", None) == selected_slot_id:
-            next_slot_dt = _parse_iso_datetime(getattr(slot, "window_start", None))
-            break
-        if getattr(slot, "selected", False):
-            next_slot_dt = _parse_iso_datetime(getattr(slot, "window_start", None))
-            break
+        slot_id = str(getattr(slot, "slot_id", None) or "")
+        start_dt = _parse_iso_datetime(getattr(slot, "window_start", None))
+        if start_dt is None:
+            continue
+        end_dt = _parse_iso_datetime(getattr(slot, "window_end", None))
+        cutoff_dt = _parse_iso_datetime(getattr(slot, "cut_off_time", None))
+        is_avail = bool(getattr(slot, "is_available", True))
+        is_sel = bool(getattr(slot, "selected", False)) or bool(
+            selected_slot_id and slot_id == str(selected_slot_id)
+        )
+        if is_sel or is_avail:
+            parsed_slots.append(
+                {
+                    "slot_id": slot_id,
+                    "window_start": start_dt.isoformat(),
+                    "window_end": end_dt.isoformat() if end_dt else None,
+                    "cut_off_time": cutoff_dt.isoformat() if cutoff_dt else None,
+                    "is_available": is_avail,
+                    "selected": is_sel,
+                }
+            )
+        if is_sel and next_slot_dt is None:
+            next_slot_dt = start_dt
+
+    parsed_slots.sort(key=lambda s: str(s["window_start"]))
+    if next_slot_dt is None and parsed_slots:
+        next_slot_dt = _parse_iso_datetime(parsed_slots[0]["window_start"])
+    if parsed_slots:
+        set_setting(db, KEY_PICNIC_DELIVERY_SLOTS_JSON, json.dumps(parsed_slots[:8]))
 
     total_price_cents = (
         getattr(cart, "checkout_total_price", None)

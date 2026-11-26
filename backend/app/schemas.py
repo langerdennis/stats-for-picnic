@@ -246,11 +246,23 @@ class CartItemOut(BaseModel):
     image_url: str | None = None
 
 
+class DeliverySlotOut(BaseModel):
+    slot_id: str = ""
+    window_start: datetime
+    window_end: datetime | None = None
+    cut_off_time: datetime | None = None
+    is_available: bool = True
+    selected: bool = False
+
+
 class CartOut(BaseModel):
     fetched_at: datetime | None = None
     total_price_cents: int = 0
     item_count: int = 0
     next_slot_start: datetime | None = None
+    next_slot_end: datetime | None = None
+    next_slot_cutoff: datetime | None = None
+    delivery_slots: list[DeliverySlotOut] = Field(default_factory=list)
     items: list[CartItemOut] = Field(default_factory=list)
     metrics: BasketScoreResult = Field(default_factory=BasketScoreResult)
     delta_vs_avg: int | None = None
@@ -314,6 +326,10 @@ class DashboardResponse(BaseModel):
     live_cart_score: int | None = None
     live_cart_item_count: int = 0
     live_cart_total_cents: int = 0
+    next_slot_start: datetime | None = None
+    next_slot_end: datetime | None = None
+    next_slot_cutoff: datetime | None = None
+    delivery_slots: list[DeliverySlotOut] = Field(default_factory=list)
     top_cart_quick_win: CartQuickWin | None = None
     weekly_mealie_entries: list[MealiePlanEntryOut] = Field(default_factory=list)
     last_sync_at: datetime | None = None

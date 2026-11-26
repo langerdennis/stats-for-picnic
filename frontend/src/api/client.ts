@@ -142,9 +142,22 @@ export interface DashboardResponse {
   live_cart_score: number | null
   live_cart_item_count: number
   live_cart_total_cents: number
+  next_slot_start: string | null
+  next_slot_end: string | null
+  next_slot_cutoff: string | null
+  delivery_slots: DeliverySlot[]
   top_cart_quick_win: CartQuickWin | null
   weekly_mealie_entries: MealiePlanEntry[]
   last_sync_at: string | null
+}
+
+export interface DeliverySlot {
+  slot_id: string
+  window_start: string
+  window_end: string | null
+  cut_off_time: string | null
+  is_available: boolean
+  selected: boolean
 }
 
 export interface OIDCStatus {
@@ -217,6 +230,9 @@ export interface Cart {
   total_price_cents: number
   item_count: number
   next_slot_start: string | null
+  next_slot_end: string | null
+  next_slot_cutoff: string | null
+  delivery_slots: DeliverySlot[]
   items: CartItem[]
   metrics: BasketScoreResult
   delta_vs_avg: number | null
@@ -592,4 +608,56 @@ export function formatShortDate(iso: string | null): string {
     day: '2-digit',
     month: '2-digit',
   })
+}
+
+function formatHHMM(d: Date): string {
+  return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+}
+
+export function formatSlotWindow(startIso: string | null, endIso?: string | null): string {
+  if (!startIso) return '—'
+  const start = new Date(startIso)
+  if (Number.isNaN(start.getTime())) return '—'
+  const dayPart = start.toLocaleDateString('de-DE', {
+    weekday: 'short',
+    day: '2-digit',
+    month: '2-digit',
+  })
+  const startTime = formatHHMM(start)
+  if (endIso) {
+    const end = new Date(endIso)
+    if (!Number.isNaN(end.getTime())) {
+      return `${dayPart} · ${startTime}–${formatHHMM(end)}`
+    }
+  }
+  return `${dayPart} · ab ${startTime}`
+}
+
+export function formatSlotChip(startIso: string, endIso?: string | null): {
+  day: string
+  time: string
+} {
+  const start = new Date(startIso)
+  if (Number.isNaN(start.getTime())) return { day: '—', time: '' }
+  const day = start.toLocaleDateString('de-DE', {
+    weekday: 'short',
+    day: '2-digit',
+    month: '2-digit',
+  })
+  const startH = formatHHMM(start)
+  if (endIso) {
+    const end = new Date(endIso)
+    if (!Number.isNaN(end.getTime())) {
+      return { day, time: `${startH}–${formatHHMM(end)}` }
+    }
+  }
+  return { day, time: startH }
+}
+
+export function formatSlotCutoff(cutoffIso: string | null | undefined): string | null {
+  if (!cutoffIso) return null
+  const d = new Date(cutoffIso)
+  if (Number.isNaN(d.getTime())) return null
+  const day = d.toLocaleDateString('de-DE', { weekday: 'short' })
+  return `Schluss ${day} ${formatHHMM(d)}`
 }

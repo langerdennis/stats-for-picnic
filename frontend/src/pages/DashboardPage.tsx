@@ -1,15 +1,27 @@
 import {
   ArrowRight,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Clock,
   KeyRound,
   PlayCircle,
   Plus,
   RefreshCw,
   ShoppingBag,
   Sparkles,
+  Truck,
   Utensils,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, formatEuro, type DashboardResponse } from '../api/client'
+import {
+  api,
+  formatEuro,
+  formatSlotChip,
+  formatSlotCutoff,
+  formatSlotWindow,
+  type DashboardResponse,
+} from '../api/client'
 import { DriversCard } from '../components/DriversCard'
 import { MealieRecipeCard } from '../components/MealieRecipeCard'
 import { GoalChecklist, StreakAndBestBadges, TierPill } from '../components/QualityBadges'
@@ -34,6 +46,7 @@ export function DashboardPage({
   const [syncing, setSyncing] = useState(false)
   const [startingDemo, setStartingDemo] = useState(false)
   const [boosting, setBoosting] = useState(false)
+  const [mobileRatiosOpen, setMobileRatiosOpen] = useState(false)
   const [boostToast, setBoostToast] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -207,31 +220,31 @@ export function DashboardPage({
       )}
 
       {/* Hero Row: Weekly Score + Live Cart Pre-Checkout shortcut (md+ for Foldables & Desktop) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <section className="md:col-span-2 bg-white border border-[#E5E4DF] rounded-2xl p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4">
+        <section className="md:col-span-2 bg-white border border-[#E5E4DF] rounded-2xl p-4 sm:p-6">
+          <div className="flex items-start justify-between gap-2.5">
             <div>
               <div className="flex items-center flex-wrap gap-2">
-                <span className="text-xs font-medium uppercase tracking-wider text-zinc-400">
+                <span className="text-[11px] sm:text-xs font-medium uppercase tracking-wider text-zinc-400">
                   Wochenqualität · {data.current_week_iso}
                 </span>
                 {metrics && <TierPill tier={metrics.tier} />}
               </div>
 
-              <div className="mt-2 flex items-baseline flex-wrap gap-3">
-                <span className="text-5xl font-semibold tracking-tight text-[#18181B] tabular-nums">
+              <div className="mt-1.5 sm:mt-2 flex items-baseline flex-wrap gap-2 sm:gap-3">
+                <span className="text-4xl sm:text-5xl font-semibold tracking-tight text-[#18181B] tabular-nums">
                   {metrics ? metrics.score : '—'}
                 </span>
-                <span className="text-base text-zinc-400 font-medium">/100</span>
+                <span className="text-sm sm:text-base text-zinc-400 font-medium">/100</span>
                 {delta != null && (
                   <span
-                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold tabular-nums ${
+                    className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold tabular-nums ${
                       delta >= 0
                         ? 'bg-[#2E7D5B]/10 text-[#2E7D5B]'
                         : 'bg-[#D97706]/12 text-[#B45309]'
                     }`}
                   >
-                    {delta >= 0 ? `+${delta}` : delta} vs. 8-Wo.-Schnitt
+                    {delta >= 0 ? `+${delta}` : delta} vs. Schnitt
                   </span>
                 )}
               </div>
@@ -241,7 +254,7 @@ export function DashboardPage({
               type="button"
               onClick={handleSync}
               disabled={syncing}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] hover:bg-zinc-100 text-xs font-medium text-zinc-700 transition cursor-pointer disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] hover:bg-zinc-100 text-xs font-medium text-zinc-700 transition cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
               {syncing ? 'Lädt…' : 'Sync'}
@@ -249,31 +262,52 @@ export function DashboardPage({
           </div>
 
           {metrics && (
-            <div className="mt-3 space-y-3">
+            <div className="mt-2.5 sm:mt-3 space-y-2.5 sm:space-y-3">
               <StreakAndBestBadges
                 streakWeeks={data.healthy_streak_weeks}
                 isPersonalBest={data.is_personal_best}
               />
-              <p className="text-sm text-zinc-600 leading-relaxed">{metrics.insight_text}</p>
               <GoalChecklist tier={metrics.tier} />
-              <div className="pt-1">
-                <RatioBars metrics={metrics} />
-              </div>
-              {metrics.ignored_item_count > 0 && (
-                <p className="text-xs text-zinc-400">
-                  {metrics.included_item_count} Lebensmittel ausgewertet ·{' '}
-                  {metrics.ignored_item_count} Haushalts-/Familienartikel ignoriert.
+
+              {/* Mobile: compact 1-line toggle so Live Cart & Delivery Times fit in first viewport */}
+              <button
+                type="button"
+                onClick={() => setMobileRatiosOpen((v) => !v)}
+                className="md:hidden w-full py-1.5 px-2.5 rounded-xl bg-[#FAF9F6] border border-[#E5E4DF] flex items-center justify-between gap-2 text-[11px] font-medium text-zinc-600 cursor-pointer"
+              >
+                <span className="truncate tabular-nums">
+                  {mobileRatiosOpen
+                    ? 'Quoten-Balken ausblenden'
+                    : `${metrics.protein_per_1000_kcal.toFixed(0)} g Prot · ${metrics.fresh_share_pct.toFixed(0)} % Frisch · ${metrics.nova_1_2_share_pct.toFixed(0)} % NOVA`}
+                </span>
+                {mobileRatiosOpen ? (
+                  <ChevronUp className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
+                )}
+              </button>
+
+              <div className={`${mobileRatiosOpen ? 'block' : 'hidden'} md:block space-y-3`}>
+                <p className="text-xs sm:text-sm text-zinc-600 leading-relaxed">
+                  {metrics.insight_text}
                 </p>
-              )}
+                <RatioBars metrics={metrics} />
+                {metrics.ignored_item_count > 0 && (
+                  <p className="text-[11px] sm:text-xs text-zinc-400">
+                    {metrics.included_item_count} Lebensmittel ausgewertet ·{' '}
+                    {metrics.ignored_item_count} Haushalts-/Familienartikel ignoriert.
+                  </p>
+                )}
+              </div>
             </div>
           )}
         </section>
 
         {/* Live Pre-Checkout Cart Quick Card */}
-        <section className="bg-white border border-[#E5E4DF] rounded-2xl p-5 sm:p-6 flex flex-col justify-between">
+        <section className="bg-white border border-[#E5E4DF] rounded-2xl p-4 sm:p-6 flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium uppercase tracking-wider text-zinc-400">
+              <span className="text-[11px] sm:text-xs font-medium uppercase tracking-wider text-zinc-400">
                 Live Warenkorb
               </span>
               <ShoppingBag className="w-4 h-4 text-[#2E7D5B]" />
@@ -281,18 +315,38 @@ export function DashboardPage({
 
             {data.live_cart_item_count > 0 ? (
               <>
-                <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-4xl font-semibold tabular-nums text-[#18181B]">
-                    {data.live_cart_score ?? '—'}
-                  </span>
-                  <span className="text-sm text-zinc-400">/100 Pre-Checkout</span>
-                </div>
-                <div className="mt-2 text-sm text-zinc-600 tabular-nums">
-                  {data.live_cart_item_count} Artikel · {formatEuro(data.live_cart_total_cents)}
+                <div className="mt-2 sm:mt-3 flex items-baseline justify-between gap-2 flex-wrap">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-3xl sm:text-4xl font-semibold tabular-nums text-[#18181B]">
+                      {data.live_cart_score ?? '—'}
+                    </span>
+                    <span className="text-xs sm:text-sm text-zinc-400">/100</span>
+                  </div>
+                  <div className="text-xs sm:text-sm text-zinc-600 tabular-nums font-medium">
+                    {data.live_cart_item_count} Art. · {formatEuro(data.live_cart_total_cents)}
+                  </div>
                 </div>
 
+                {/* Next / Selected Delivery Slot */}
+                {data.next_slot_start && (
+                  <div className="mt-2.5 px-2.5 py-2 rounded-xl bg-[#FAF9F6] border border-[#E5E4DF] space-y-0.5 text-xs">
+                    <div className="flex items-center gap-1.5 font-medium text-[#18181B] tabular-nums">
+                      <Truck className="w-3.5 h-3.5 text-[#2E7D5B] shrink-0" />
+                      <span className="truncate">
+                        {formatSlotWindow(data.next_slot_start, data.next_slot_end)}
+                      </span>
+                    </div>
+                    {formatSlotCutoff(data.next_slot_cutoff) && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 pl-5 tabular-nums">
+                        <Clock className="w-3 h-3 text-zinc-400 shrink-0" />
+                        <span>{formatSlotCutoff(data.next_slot_cutoff)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {data.top_cart_quick_win ? (
-                  <div className="mt-3.5 p-3 rounded-xl bg-[#2E7D5B]/[0.06] border border-[#2E7D5B]/20 flex items-center justify-between gap-2">
+                  <div className="mt-2.5 sm:mt-3 p-2.5 sm:p-3 rounded-xl bg-[#2E7D5B]/[0.06] border border-[#2E7D5B]/20 flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="text-[11px] font-semibold text-[#2E7D5B]">
                         1-Tap Boost (+{data.top_cart_quick_win.score_delta} Pkt.)
@@ -316,27 +370,56 @@ export function DashboardPage({
                     </button>
                   </div>
                 ) : (
-                  <p className="mt-3 text-xs text-zinc-500 leading-relaxed">
+                  <p className="mt-2.5 text-xs text-zinc-500 leading-relaxed">
                     Prüfe deinen offenen Picnic-Warenkorb vor dem Bestellen und ergänze gesunde
                     Favoriten mit einem Klick.
                   </p>
                 )}
               </>
             ) : (
-              <p className="mt-4 text-sm text-zinc-500">Aktuell kein offener Picnic-Warenkorb.</p>
+              <p className="mt-3 text-sm text-zinc-500">Aktuell kein offener Picnic-Warenkorb.</p>
             )}
           </div>
 
           <button
             type="button"
             onClick={() => onNavigate('cart')}
-            className="mt-5 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#18181B] hover:bg-zinc-800 text-white text-sm font-medium transition cursor-pointer"
+            className="mt-4 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#18181B] hover:bg-zinc-800 text-white text-sm font-medium transition cursor-pointer"
           >
             Pre-Checkout öffnen
             <ArrowRight className="w-4 h-4" />
           </button>
         </section>
       </div>
+
+      {/* Compact Upcoming Picnic Delivery Slots Strip */}
+      {data.delivery_slots.length > 0 && (
+        <section className="bg-white border border-[#E5E4DF] rounded-2xl px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-2.5">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-400 shrink-0">
+            <Truck className="w-3.5 h-3.5 text-[#2E7D5B]" />
+            <span>Lieferzeiten</span>
+          </div>
+          <div className="flex items-center gap-2 overflow-x-auto pb-0.5 -mx-1 px-1">
+            {data.delivery_slots.slice(0, 5).map((slot) => {
+              const { day, time } = formatSlotChip(slot.window_start, slot.window_end)
+              return (
+                <div
+                  key={slot.slot_id || slot.window_start}
+                  className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-xs tabular-nums ${
+                    slot.selected
+                      ? 'bg-[#2E7D5B]/10 border-[#2E7D5B]/30 text-[#1F5A41] font-semibold'
+                      : 'bg-[#FAF9F6] border-[#E5E4DF] text-zinc-700'
+                  }`}
+                >
+                  {slot.selected && <Check className="w-3 h-3 text-[#2E7D5B] shrink-0" />}
+                  <span>{day}</span>
+                  <span className={slot.selected ? 'text-[#2E7D5B]' : 'text-zinc-500'}>{time}</span>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
       {/* Positive & Negative Drivers */}
       {metrics && (

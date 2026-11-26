@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   ChevronUp,
+  Clock,
   Eye,
   EyeOff,
   Minus,
@@ -11,6 +12,7 @@ import {
   ShoppingBag,
   Sparkles,
   TrendingUp,
+  Truck,
   Utensils,
   X,
 } from 'lucide-react'
@@ -18,7 +20,8 @@ import { useEffect, useRef, useState } from 'react'
 import {
   api,
   formatEuro,
-  formatShortDate,
+  formatSlotCutoff,
+  formatSlotWindow,
   type Cart,
   type MealiePlanEntry,
   type PicnicSearchItem,
@@ -502,11 +505,23 @@ export function CartPage({ onCartCountChange }: Props) {
             <div className="flex items-center flex-wrap gap-2 text-xs font-medium uppercase tracking-wider text-zinc-400">
               <ShoppingBag className="w-3.5 h-3.5 text-[#2E7D5B]" />
               <span>Pre-Checkout</span>
-              {cart?.next_slot_start && (
-                <span>· {formatShortDate(cart.next_slot_start)}</span>
-              )}
               {cart && <TierPill tier={cart.metrics.tier} />}
             </div>
+
+            {cart?.next_slot_start && (
+              <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600 tabular-nums">
+                <span className="inline-flex items-center gap-1.5 font-medium text-[#18181B]">
+                  <Truck className="w-3.5 h-3.5 text-[#2E7D5B]" />
+                  {formatSlotWindow(cart.next_slot_start, cart.next_slot_end)}
+                </span>
+                {formatSlotCutoff(cart.next_slot_cutoff) && (
+                  <span className="inline-flex items-center gap-1 text-zinc-500">
+                    <Clock className="w-3 h-3 text-zinc-400" />
+                    {formatSlotCutoff(cart.next_slot_cutoff)}
+                  </span>
+                )}
+              </div>
+            )}
 
             <div className="flex items-baseline flex-wrap gap-2.5">
               <span className="text-5xl font-semibold tracking-tight tabular-nums">

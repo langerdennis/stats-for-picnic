@@ -28,9 +28,10 @@ def test_stats_endpoint_all_ranges_and_insights(client: TestClient) -> None:
     assert len(stats["periods"]) == 8
     assert all(p["spend_cents"] > 0 for p in stats["periods"])
 
-    # Product ranking sorted by spend descending and contains price history
+    # Product ranking excludes one-off purchases (delivery_hits >= 2), sorted by spend descending
     products = stats["products"]
     assert len(products) >= 10
+    assert all(p["delivery_hits"] >= 2 for p in products)
     assert products[0]["total_spend_cents"] >= products[-1]["total_spend_cents"]
     assert any(len(p["price_history"]) >= 2 for p in products)
 

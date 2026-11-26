@@ -29,6 +29,7 @@ from app.schemas import (
     DashboardResponse,
     DeliveryItemOut,
     DeliveryOut,
+    DeliverySlotOut,
     MealiePlanEntryOut,
     MealieRecipeOut,
     PicnicSearchItemOut,
@@ -45,6 +46,7 @@ from app.services.mealie_service import is_mealie_configured
 from app.services.picnic_service import (
     PicnicReauthRequiredError,
     PicnicServiceError,
+    get_cached_delivery_slots,
     get_or_fetch_product_image,
     get_picnic_status,
     modify_cart_product,
@@ -209,14 +211,30 @@ def _compute_restock_suggestions(
     return [row[3] for row in candidates[:max_results]]
 
 
+def _resolve_active_slot(
+    slots: list[DeliverySlotOut],
+    fallback_start: datetime | None,
+) -> tuple[datetime | None, datetime | None, datetime | None]:
+    chosen = next((s for s in slots if s.selected), None) or (slots[0] if slots else None)
+    if chosen is not None:
+        return chosen.window_start, chosen.window_end, chosen.cut_off_time
+    return fallback_start, None, None
+
+
 def _build_cart_out(db: Session) -> CartOut:
     targets = _get_targets(db)
     snap = db.scalar(select(CartSnapshot).order_by(desc(CartSnapshot.id)).limit(1))
     trend, _ = build_weekly_trend(db)
     hist_scores = [pt.score for pt in trend]
+    slots = get_cached_delivery_slots(db)
 
     if snap is None:
+        slot_start, slot_end, slot_cutoff = _resolve_active_slot(slots, None)
         return CartOut(
+            next_slot_start=slot_start,
+            next_slot_end=slot_end,
+            next_slot_cutoff=slot_cutoff,
+            delivery_slots=slots,
             avg_8_weeks=compute_rolling_average_and_delta(None, hist_scores)[0],
             restock_suggestions=_compute_restock_suggestions(db, set()),
         )
@@ -282,12 +300,16 @@ def _build_cart_out(db: Session) -> CartOut:
     remove_wins = compute_cart_remove_wins(scorable, max_results=2, targets=targets)
     cart_ids = {item.picnic_id for item in items_out}
     restock = _compute_restock_suggestions(db, cart_ids)
+    slot_start, slot_end, slot_cutoff = _resolve_active_slot(slots, snap.next_slot_start)
 
     return CartOut(
         fetched_at=snap.fetched_at,
         total_price_cents=snap.total_price_cents,
         item_count=snap.item_count,
-        next_slot_start=snap.next_slot_start,
+        next_slot_start=slot_start,
+        next_slot_end=slot_end,
+        next_slot_cutoff=slot_cutoff,
+        delivery_slots=slots,
         items=items_out,
         metrics=metrics,
         delta_vs_avg=delta,
@@ -368,6 +390,10 @@ def get_dashboard(db: Session = Depends(get_db)) -> DashboardResponse:
         live_cart_score=cart.metrics.score if cart.item_count > 0 else None,
         live_cart_item_count=cart.item_count,
         live_cart_total_cents=cart.total_price_cents,
+        next_slot_start=cart.next_slot_start,
+        next_slot_end=cart.next_slot_end,
+        next_slot_cutoff=cart.next_slot_cutoff,
+        delivery_slots=cart.delivery_slots,
         top_cart_quick_win=cart.quick_wins[0] if cart.quick_wins else None,
         weekly_mealie_entries=mealie_entries,
         last_sync_at=last_run.finished_at if last_run else None,

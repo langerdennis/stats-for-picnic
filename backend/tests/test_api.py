@@ -27,6 +27,11 @@ def test_demo_dashboard_deliveries_and_mealie(client: TestClient) -> None:
     assert len(dash["trend_8_weeks"]) == 8
     assert dash["current_week_metrics"]["score"] > 0
     assert dash["live_cart_item_count"] > 0
+    assert dash["next_slot_start"] is not None
+    assert dash["next_slot_end"] is not None
+    assert dash["next_slot_cutoff"] is not None
+    assert len(dash["delivery_slots"]) >= 3
+    assert any(slot["selected"] for slot in dash["delivery_slots"])
     assert len(dash["weekly_mealie_entries"]) >= 1
 
     # Check proxied recipe image returns SVG in demo mode

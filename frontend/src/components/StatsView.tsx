@@ -505,7 +505,12 @@ export function StatsView({ onAddToCart, busyId }: Props) {
         {/* Right Column: Searchable Per-Product Spending / Units / Weight Ranking */}
         <section className="md:col-span-6 bg-white border border-[#E5E4DF] rounded-2xl p-4 sm:p-5 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-[#18181B]">Ausgaben nach Lebensmittel</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-[#18181B]">Ausgaben nach Lebensmittel</h3>
+              <p className="text-[11px] text-zinc-400">
+                Nur mehrfach gekaufte Produkte (≥ 2 Lieferungen)
+              </p>
+            </div>
             <div className="inline-flex p-0.5 rounded-lg bg-[#FAF9F6] border border-[#E5E4DF] text-[11px]">
               {(
                 [

@@ -92,8 +92,8 @@ export function SettingsPage({ onDemoModeChange }: Props) {
   const [loading, setLoading] = useState(true)
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({
-    app: true,
-    picnic: true,
+    app: false,
+    picnic: false,
     oidc: false,
     llm: false,
     mealie: false,

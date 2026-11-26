@@ -10,6 +10,7 @@ KEY_PICNIC_AUTH_TOKEN = "picnic_auth_token"
 KEY_PICNIC_COUNTRY_CODE = "picnic_country_code"
 KEY_PICNIC_USERNAME = "picnic_username"
 KEY_PICNIC_AUTH_STATUS = "picnic_auth_status"
+KEY_PICNIC_DELIVERY_SLOTS_JSON = "picnic_delivery_slots_json"
 
 KEY_MEALIE_URL = "mealie_url"
 KEY_MEALIE_API_TOKEN = "mealie_api_token"

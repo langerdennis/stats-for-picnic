@@ -325,6 +325,11 @@ def compute_household_stats(
                     )
                 )
 
+        # Exclude one-off purchases (only 1 delivery) from recurring product statistics when >= 2 deliveries exist
+        min_required_hits = 2 if delivery_count >= 2 else 1
+        if prod_hits[pid] < min_required_hits:
+            continue
+
         product_stats.append(
             ProductStatItem(
                 picnic_id=pid,
@@ -343,7 +348,7 @@ def compute_household_stats(
             )
         )
 
-        # Protein per Euro (g protein per 1.00 EUR) for non-ignored foods with protein >= 8g/100g
+        # Protein per Euro (g protein per 1.00 EUR) for recurring, non-ignored foods with protein >= 8g/100g
         if (
             prod is not None
             and prod.is_food
@@ -378,7 +383,7 @@ def compute_household_stats(
     price_changes.sort(key=lambda item: (-abs(item.delta_pct), -abs(item.delta_cents)))
     protein_leaders.sort(key=lambda item: (-item.protein_g_per_euro, -item.total_units))
 
-    # Shopping habits & "Wrapped" superlatives
+    # Shopping habits & "Wrapped" superlatives (recurring items only)
     avg_days: float | None = None
     if len(delivery_dates_sorted) >= 2:
         delivery_dates_sorted.sort()
