@@ -468,9 +468,17 @@ def seed_demo_picnic_data(db: Session, force_cart: bool = False) -> dict[str, in
         db.add(delivery)
         db.flush()
 
+        # Realistic historical price offsets for the earlier 4 demo weeks so price-change insights shine
+        demo_early_price_offset = {
+            "p_eier": -40,       # rising
+            "p_olivenoel": -90,  # rising
+            "p_tomaten": 30,     # cheaper recently
+        }
+
         for pid, qty in order_lines:
             spec = DEMO_PRODUCT_MAP[pid]
-            line_price = spec.price_cents * qty
+            unit_cents = spec.price_cents + (demo_early_price_offset.get(pid, 0) if idx < 4 else 0)
+            line_price = max(50, unit_cents) * qty
             total_price += line_price
             total_items += qty
             db.add(

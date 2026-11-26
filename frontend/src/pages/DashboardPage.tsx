@@ -18,11 +18,17 @@ import { TrendChart } from '../components/TrendChart'
 
 interface Props {
   onNavigate: (tab: 'dashboard' | 'cart' | 'history' | 'products' | 'settings') => void
+  onOpenStats?: () => void
   onCartCountChange?: (count: number) => void
   onDemoModeChange?: (demo: boolean) => void
 }
 
-export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange }: Props) {
+export function DashboardPage({
+  onNavigate,
+  onOpenStats,
+  onCartCountChange,
+  onDemoModeChange,
+}: Props) {
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
@@ -342,21 +348,32 @@ export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange 
 
       {/* 8-Week Trend */}
       <section className="bg-white border border-[#E5E4DF] rounded-2xl p-5 sm:p-6">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div>
             <h2 className="text-sm font-semibold text-[#18181B]">8-Wochen-Verlauf</h2>
             <p className="text-xs text-zinc-500">
               Haushaltsunabhängiger Qualitäts-Trend statt täglichem Kalorienzählen
             </p>
           </div>
-          {data.avg_8_weeks != null && (
-            <span className="text-xs text-zinc-500 tabular-nums">
-              Schnitt: <strong className="text-[#18181B]">{data.avg_8_weeks}</strong>
-              {data.best_8_week_score != null && (
-                <span className="ml-2 text-zinc-400">· Bestwert: {data.best_8_week_score}</span>
-              )}
-            </span>
-          )}
+          <div className="flex items-center flex-wrap gap-3">
+            {data.avg_8_weeks != null && (
+              <span className="text-xs text-zinc-500 tabular-nums">
+                Schnitt: <strong className="text-[#18181B]">{data.avg_8_weeks}</strong>
+                {data.best_8_week_score != null && (
+                  <span className="ml-2 text-zinc-400">· Bestwert: {data.best_8_week_score}</span>
+                )}
+              </span>
+            )}
+            {onOpenStats && (
+              <button
+                type="button"
+                onClick={onOpenStats}
+                className="text-xs font-medium text-[#2E7D5B] hover:underline cursor-pointer"
+              >
+                Alle Statistiken →
+              </button>
+            )}
+          </div>
         </div>
         <TrendChart points={data.trend_8_weeks} />
       </section>

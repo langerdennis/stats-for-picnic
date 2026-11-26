@@ -36,8 +36,10 @@ from app.schemas import (
     ProductUpdateRequest,
     RestockSuggestion,
     ScoringTargets,
+    StatsResponse,
     WeekTrendPoint,
 )
+from app.services.analytics import StatsRange, compute_household_stats
 from app.services.enrichment import enrich_pending_products
 from app.services.mealie_service import is_mealie_configured
 from app.services.picnic_service import (
@@ -422,6 +424,14 @@ def list_deliveries(db: Session = Depends(get_db)) -> list[DeliveryOut]:
             )
         )
     return out
+
+
+@router.get("/stats", response_model=StatsResponse)
+def get_stats(
+    range: StatsRange = Query(default="90d"),
+    db: Session = Depends(get_db),
+) -> StatsResponse:
+    return compute_household_stats(db, range_key=range)
 
 
 @router.get("/picnic/search", response_model=list[PicnicSearchItemOut])

@@ -321,9 +321,119 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+export type StatsRange = '30d' | '90d' | '1y' | 'all'
+
+export interface StatsSummary {
+  delivery_count: number
+  total_spend_cents: number
+  avg_spend_per_delivery_cents: number
+  avg_spend_per_week_cents: number
+  total_item_units: number
+  unique_products: number
+  total_food_weight_kg: number
+  avg_score: number | null
+  healthy_spend_share_pct: number
+  snack_spend_share_pct: number
+  food_spend_cents: number
+  non_food_spend_cents: number
+  repeat_purchase_share_pct: number
+}
+
+export interface BucketSpendPoint {
+  bucket: string
+  spend_cents: number
+  share_pct: number
+  weight_kg: number
+  unit_count: number
+}
+
+export interface PeriodSpendScorePoint {
+  period_key: string
+  label: string
+  spend_cents: number
+  delivery_count: number
+  avg_score: number | null
+}
+
+export interface ProductPricePoint {
+  date: string
+  unit_price_cents: number
+}
+
+export interface ProductStatItem {
+  picnic_id: string
+  name: string
+  bucket: string
+  unit_quantity: string | null
+  image_url: string
+  total_spend_cents: number
+  total_units: number
+  delivery_hits: number
+  total_weight_kg: number
+  avg_unit_price_cents: number
+  latest_unit_price_cents: number
+  price_change_pct: number | null
+  price_history: ProductPricePoint[]
+}
+
+export interface PriceChangeItem {
+  picnic_id: string
+  name: string
+  bucket: string
+  image_url: string
+  first_price_cents: number
+  latest_price_cents: number
+  delta_cents: number
+  delta_pct: number
+  first_date: string
+  latest_date: string
+  price_history: ProductPricePoint[]
+}
+
+export interface ProteinValueItem {
+  picnic_id: string
+  name: string
+  bucket: string
+  image_url: string
+  protein_g_per_euro: number
+  protein_g_per_unit: number
+  avg_unit_price_cents: number
+  total_units: number
+}
+
+export interface WeekdayCount {
+  day: string
+  count: number
+}
+
+export interface ShoppingHabits {
+  avg_days_between_deliveries: number | null
+  favorite_weekday: string | null
+  weekday_distribution: WeekdayCount[]
+  largest_delivery_cents: number
+  smallest_delivery_cents: number
+  heaviest_product_name: string | null
+  heaviest_product_kg: number
+  most_bought_product_name: string | null
+  most_bought_product_units: number
+}
+
+export interface StatsResponse {
+  range: StatsRange
+  summary: StatsSummary
+  buckets: BucketSpendPoint[]
+  periods: PeriodSpendScorePoint[]
+  products: ProductStatItem[]
+  price_changes: PriceChangeItem[]
+  protein_value_leaders: ProteinValueItem[]
+  habits: ShoppingHabits
+}
+
 export const api = {
   getDashboard: () => request<DashboardResponse>('/api/v1/dashboard'),
   getDeliveries: () => request<Delivery[]>('/api/v1/deliveries'),
+  getStats: (range: StatsRange = '90d') =>
+    request<StatsResponse>(`/api/v1/stats?range=${encodeURIComponent(range)}`),
   getCart: () => request<Cart>('/api/v1/cart'),
   refreshCart: () => request<Cart>('/api/v1/cart/refresh', { method: 'POST' }),
   addToCart: (product_id: string, count = 1) =>

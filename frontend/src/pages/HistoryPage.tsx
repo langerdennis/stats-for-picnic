@@ -1,4 +1,13 @@
-import { ChevronDown, ChevronUp, Eye, EyeOff, Plus, Receipt, Utensils } from 'lucide-react'
+import {
+  BarChart3,
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  EyeOff,
+  Plus,
+  Receipt,
+  Utensils,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
 import {
   api,
@@ -10,18 +19,37 @@ import {
 import { BucketBadge, NovaBadge } from '../components/BucketBadge'
 import { MealieRecipeCard } from '../components/MealieRecipeCard'
 import { ProductThumb } from '../components/ProductThumb'
+import { StatsView } from '../components/StatsView'
+
+type HistorySubTab = 'deliveries' | 'stats'
 
 interface Props {
+  initialSubTab?: HistorySubTab
+  onSubTabChange?: (sub: HistorySubTab) => void
   onCartCountChange?: (count: number) => void
 }
 
-export function HistoryPage({ onCartCountChange }: Props) {
+export function HistoryPage({
+  initialSubTab = 'deliveries',
+  onSubTabChange,
+  onCartCountChange,
+}: Props) {
+  const [subTab, setSubTab] = useState<HistorySubTab>(initialSubTab)
   const [deliveries, setDeliveries] = useState<Delivery[]>([])
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [mealieByWeek, setMealieByWeek] = useState<Record<string, MealiePlanEntry[]>>({})
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+
+  useEffect(() => {
+    setSubTab(initialSubTab)
+  }, [initialSubTab])
+
+  const switchSubTab = (next: HistorySubTab) => {
+    setSubTab(next)
+    onSubTabChange?.(next)
+  }
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -95,24 +123,6 @@ export function HistoryPage({ onCartCountChange }: Props) {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-3 animate-pulse">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="h-24 rounded-2xl bg-white border border-[#E5E4DF]" />
-        ))}
-      </div>
-    )
-  }
-
-  if (!deliveries.length) {
-    return (
-      <div className="bg-white border border-[#E5E4DF] rounded-2xl p-8 text-center text-sm text-zinc-500">
-        Noch keine vergangenen Picnic-Lieferungen vorhanden.
-      </div>
-    )
-  }
-
   // Calm 8-week household context (weekly spend + average score)
   const recentDeliveries = deliveries.slice(0, 8)
   const uniqueWeeks = new Set(recentDeliveries.map((d) => d.iso_week)).size || 1
@@ -131,41 +141,86 @@ export function HistoryPage({ onCartCountChange }: Props) {
         </div>
       )}
 
-      <div className="flex items-center justify-between">
+      {/* Header + Segmented Switch: Lieferungen | Statistiken */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-base font-semibold text-[#18181B]">Vergangene Einkäufe</h2>
+          <h2 className="text-base font-semibold text-[#18181B]">
+            {subTab === 'stats' ? 'Einkaufs-Statistiken' : 'Vergangene Einkäufe'}
+          </h2>
           <p className="text-xs text-zinc-500">
-            Alle Lieferungen mit Qualitäts-Aufschlüsselung, 1-Klick Re-Add & Mealie-Wochenplan.
+            {subTab === 'stats'
+              ? 'Ausgaben nach Lebensmittel & Kategorie, Preisänderungen, Protein pro Euro & Rhythmus.'
+              : 'Alle Lieferungen mit Qualitäts-Aufschlüsselung, 1-Klick Re-Add & Mealie-Wochenplan.'}
           </p>
         </div>
-        <span className="text-xs text-zinc-400 tabular-nums">{deliveries.length} Lieferungen</span>
+
+        <div className="inline-flex p-1 rounded-xl bg-white border border-[#E5E4DF] gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => switchSubTab('deliveries')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
+              subTab === 'deliveries'
+                ? 'bg-[#18181B] text-white'
+                : 'text-zinc-600 hover:bg-[#FAF9F6]'
+            }`}
+          >
+            <Receipt className="w-3.5 h-3.5" />
+            Lieferungen
+          </button>
+          <button
+            type="button"
+            onClick={() => switchSubTab('stats')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
+              subTab === 'stats'
+                ? 'bg-[#18181B] text-white'
+                : 'text-zinc-600 hover:bg-[#FAF9F6]'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            Statistiken
+          </button>
+        </div>
       </div>
 
-      {/* Calm 8-Week Spend & Quality Context */}
-      <div className="grid grid-cols-3 gap-3">
-        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
-          <div className="text-[11px] text-zinc-400 font-medium">Ø pro Woche</div>
-          <div className="mt-1 text-base sm:text-lg font-semibold text-[#18181B] tabular-nums">
-            {formatEuro(avgWeeklyCents)}
-          </div>
+      {subTab === 'stats' ? (
+        <StatsView onAddToCart={handleReAdd} busyId={busyId} />
+      ) : loading ? (
+        <div className="space-y-3 animate-pulse">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-24 rounded-2xl bg-white border border-[#E5E4DF]" />
+          ))}
         </div>
-        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
-          <div className="text-[11px] text-zinc-400 font-medium">
-            Gesamt ({uniqueWeeks} Wo.)
-          </div>
-          <div className="mt-1 text-base sm:text-lg font-semibold text-[#18181B] tabular-nums">
-            {formatEuro(totalRecentCents)}
-          </div>
+      ) : !deliveries.length ? (
+        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-8 text-center text-sm text-zinc-500">
+          Noch keine vergangenen Picnic-Lieferungen vorhanden.
         </div>
-        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
-          <div className="text-[11px] text-zinc-400 font-medium">Ø Wochen-Score</div>
-          <div className="mt-1 text-base sm:text-lg font-semibold text-[#2E7D5B] tabular-nums">
-            {avgRecentScore != null ? `${avgRecentScore}/100` : '—'}
+      ) : (
+        <>
+          {/* Calm 8-Week Spend & Quality Context */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
+              <div className="text-[11px] text-zinc-400 font-medium">Ø pro Woche</div>
+              <div className="mt-1 text-base sm:text-lg font-semibold text-[#18181B] tabular-nums">
+                {formatEuro(avgWeeklyCents)}
+              </div>
+            </div>
+            <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
+              <div className="text-[11px] text-zinc-400 font-medium">
+                Gesamt ({uniqueWeeks} Wo.)
+              </div>
+              <div className="mt-1 text-base sm:text-lg font-semibold text-[#18181B] tabular-nums">
+                {formatEuro(totalRecentCents)}
+              </div>
+            </div>
+            <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
+              <div className="text-[11px] text-zinc-400 font-medium">Ø Wochen-Score</div>
+              <div className="mt-1 text-base sm:text-lg font-semibold text-[#2E7D5B] tabular-nums">
+                {avgRecentScore != null ? `${avgRecentScore}/100` : '—'}
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
 
-      {deliveries.map((d) => {
+          {deliveries.map((d) => {
         const isOpen = expandedId === d.delivery_id
         const weekRecipes = mealieByWeek[d.iso_week] ?? []
         const scoreTone =
@@ -320,6 +375,8 @@ export function HistoryPage({ onCartCountChange }: Props) {
           </article>
         )
       })}
+        </>
+      )}
     </div>
   )
 }

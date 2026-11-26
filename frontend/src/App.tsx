@@ -29,30 +29,52 @@ const NAV_ITEMS: { key: TabKey; label: string; icon: typeof LayoutGrid }[] = [
   { key: 'settings', label: 'Einstellungen', icon: Settings },
 ]
 
-function readTabFromHash(): TabKey {
-  const raw = window.location.hash.replace(/^#\/?/, '').trim() as TabKey
-  return VALID_TABS.includes(raw) ? raw : 'dashboard'
+function readRouteFromHash(): { tab: TabKey; historySub: 'deliveries' | 'stats' } {
+  const raw = window.location.hash.replace(/^#\/?/, '').trim()
+  if (raw === 'stats') {
+    return { tab: 'history', historySub: 'stats' }
+  }
+  const candidate = raw as TabKey
+  return {
+    tab: VALID_TABS.includes(candidate) ? candidate : 'dashboard',
+    historySub: 'deliveries',
+  }
 }
 
 export default function App() {
-  const [tab, setTab] = useState<TabKey>(() => readTabFromHash())
+  const initialRoute = readRouteFromHash()
+  const [tab, setTab] = useState<TabKey>(initialRoute.tab)
+  const [historySub, setHistorySub] = useState<'deliveries' | 'stats'>(initialRoute.historySub)
   const [cartCount, setCartCount] = useState<number>(0)
   const [demoMode, setDemoMode] = useState<boolean>(false)
   const [picnicReauth, setPicnicReauth] = useState<boolean>(false)
   const [oidc, setOidc] = useState<OIDCStatus | null>(null)
   const [oidcChecking, setOidcChecking] = useState(true)
 
-  const navigate = (next: TabKey) => {
+  const navigate = (next: TabKey, sub?: 'deliveries' | 'stats') => {
     setTab(next)
-    const targetHash = `#${next}`
-    if (window.location.hash !== targetHash) {
-      window.history.pushState(null, '', targetHash)
+    if (next === 'history') {
+      const nextSub = sub ?? 'deliveries'
+      setHistorySub(nextSub)
+      const targetHash = nextSub === 'stats' ? '#stats' : '#history'
+      if (window.location.hash !== targetHash) {
+        window.history.pushState(null, '', targetHash)
+      }
+    } else {
+      const targetHash = `#${next}`
+      if (window.location.hash !== targetHash) {
+        window.history.pushState(null, '', targetHash)
+      }
     }
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   useEffect(() => {
-    const onHashChange = () => setTab(readTabFromHash())
+    const onHashChange = () => {
+      const route = readRouteFromHash()
+      setTab(route.tab)
+      setHistorySub(route.historySub)
+    }
     const onOidcRequired = () => {
       setOidc((prev) => ({
         enabled: true,
@@ -255,12 +277,19 @@ export default function App() {
         {tab === 'dashboard' && (
           <DashboardPage
             onNavigate={navigate}
+            onOpenStats={() => navigate('history', 'stats')}
             onCartCountChange={setCartCount}
             onDemoModeChange={setDemoMode}
           />
         )}
         {tab === 'cart' && <CartPage onCartCountChange={setCartCount} />}
-        {tab === 'history' && <HistoryPage onCartCountChange={setCartCount} />}
+        {tab === 'history' && (
+          <HistoryPage
+            initialSubTab={historySub}
+            onSubTabChange={(sub) => navigate('history', sub)}
+            onCartCountChange={setCartCount}
+          />
+        )}
         {tab === 'products' && <ProductsPage onCartCountChange={setCartCount} />}
         {tab === 'settings' && <SettingsPage onDemoModeChange={setDemoMode} />}
       </main>

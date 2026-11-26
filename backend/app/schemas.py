@@ -448,3 +448,112 @@ class TesseraeSummaryResponse(BaseModel):
     live_cart: TesseraeLiveCart | None = None
     trend_8_weeks: list[TesseraeTrendPoint] = Field(default_factory=list)
     mealie_today: TesseraeMealieToday | None = None
+
+
+# --- Detailed Statistics schemas ---
+
+
+class StatsSummary(BaseModel):
+    delivery_count: int = 0
+    total_spend_cents: int = 0
+    avg_spend_per_delivery_cents: int = 0
+    avg_spend_per_week_cents: int = 0
+    total_item_units: int = 0
+    unique_products: int = 0
+    total_food_weight_kg: float = 0.0
+    avg_score: int | None = None
+    healthy_spend_share_pct: float = 0.0
+    snack_spend_share_pct: float = 0.0
+    food_spend_cents: int = 0
+    non_food_spend_cents: int = 0
+    repeat_purchase_share_pct: float = 0.0
+
+
+class BucketSpendPoint(BaseModel):
+    bucket: str
+    spend_cents: int
+    share_pct: float
+    weight_kg: float
+    unit_count: int
+
+
+class PeriodSpendScorePoint(BaseModel):
+    period_key: str
+    label: str
+    spend_cents: int
+    delivery_count: int
+    avg_score: int | None = None
+
+
+class ProductPricePoint(BaseModel):
+    date: str
+    unit_price_cents: int
+
+
+class ProductStatItem(BaseModel):
+    picnic_id: str
+    name: str
+    bucket: str
+    unit_quantity: str | None = None
+    image_url: str
+    total_spend_cents: int
+    total_units: int
+    delivery_hits: int
+    total_weight_kg: float
+    avg_unit_price_cents: int
+    latest_unit_price_cents: int
+    price_change_pct: float | None = None
+    price_history: list[ProductPricePoint] = Field(default_factory=list)
+
+
+class PriceChangeItem(BaseModel):
+    picnic_id: str
+    name: str
+    bucket: str
+    image_url: str
+    first_price_cents: int
+    latest_price_cents: int
+    delta_cents: int
+    delta_pct: float
+    first_date: str
+    latest_date: str
+    price_history: list[ProductPricePoint] = Field(default_factory=list)
+
+
+class ProteinValueItem(BaseModel):
+    picnic_id: str
+    name: str
+    bucket: str
+    image_url: str
+    protein_g_per_euro: float
+    protein_g_per_unit: float
+    avg_unit_price_cents: int
+    total_units: int
+
+
+class WeekdayCount(BaseModel):
+    day: str
+    count: int
+
+
+class ShoppingHabits(BaseModel):
+    avg_days_between_deliveries: float | None = None
+    favorite_weekday: str | None = None
+    weekday_distribution: list[WeekdayCount] = Field(default_factory=list)
+    largest_delivery_cents: int = 0
+    smallest_delivery_cents: int = 0
+    heaviest_product_name: str | None = None
+    heaviest_product_kg: float = 0.0
+    most_bought_product_name: str | None = None
+    most_bought_product_units: int = 0
+
+
+class StatsResponse(BaseModel):
+    range: Literal["30d", "90d", "1y", "all"] = "90d"
+    summary: StatsSummary = Field(default_factory=StatsSummary)
+    buckets: list[BucketSpendPoint] = Field(default_factory=list)
+    periods: list[PeriodSpendScorePoint] = Field(default_factory=list)
+    products: list[ProductStatItem] = Field(default_factory=list)
+    price_changes: list[PriceChangeItem] = Field(default_factory=list)
+    protein_value_leaders: list[ProteinValueItem] = Field(default_factory=list)
+    habits: ShoppingHabits = Field(default_factory=ShoppingHabits)
