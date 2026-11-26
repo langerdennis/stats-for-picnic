@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+pnpm-debug.log*
+
+# Local runtime data & SQLite
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# OS & IDEs
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
