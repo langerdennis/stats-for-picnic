@@ -90,11 +90,21 @@ def clear_pending_2fa() -> None:
     _pending_2fa = None
 
 
-def _is_auth_failure(exc: Exception) -> bool:
+def _get_last_response(api: Any | None) -> requests.Response | None:
+    if api is None:
+        return None
+    sess = getattr(api, "session", None)
+    return getattr(sess, "_sfp_last_response", None) if sess is not None else None
+
+
+def _is_auth_failure(exc: Exception, api: Any | None = None) -> bool:
     if isinstance(exc, (PicnicAuthError, Picnic2FARequired)):
         return True
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         return exc.response.status_code in (401, 403)
+    last_resp = _get_last_response(api)
+    if last_resp is not None and last_resp.status_code in (401, 403):
+        return True
     msg = str(exc).lower()
     return "401" in msg or "unauthorized" in msg or "unauthenticated" in msg
 
@@ -104,7 +114,13 @@ def _build_api_client(db: Session) -> PicnicAPI:
     country_code = get_setting(db, KEY_PICNIC_COUNTRY_CODE, "DE") or "DE"
     if not token:
         raise PicnicReauthRequiredError("Picnic ist nicht verbunden. Bitte in den Einstellungen anmelden.")
-    return PicnicAPI(country_code=country_code, auth_token=token)
+    client = PicnicAPI(country_code=country_code, auth_token=token)
+
+    def _capture_response(resp: requests.Response, *_args: Any, **_kwargs: Any) -> None:
+        client.session._sfp_last_response = resp  # type: ignore[attr-defined]
+
+    client.session.hooks["response"].append(_capture_response)
+    return client
 
 
 def _persist_rotated_token(db: Session, api: PicnicAPI) -> None:
@@ -765,6 +781,58 @@ def _extract_cart_snapshot(db: Session, cart: Any) -> CartSnapshot:
     return snap
 
 
+def _save_empty_cart_snapshot(db: Session) -> CartSnapshot:
+    """Persist an empty cart snapshot (e.g. right after an order has been submitted in Picnic)."""
+    snap = CartSnapshot(
+        fetched_at=utcnow(),
+        total_price_cents=0,
+        item_count=0,
+        next_slot_start=None,
+        items_json="[]",
+        computed_metrics_json=BasketScoreResult(
+            insight_text="Aktuell kein offener Picnic-Warenkorb."
+        ).model_dump_json(),
+    )
+    db.add(snap)
+    db.flush()
+    _prune_old_cart_snapshots(db)
+    db.commit()
+    db.refresh(snap)
+    return snap
+
+
+def _format_picnic_error(exc: Exception, api: Any | None = None) -> str:
+    last_resp = _get_last_response(api)
+    if last_resp is not None and last_resp.status_code >= 400:
+        return f"HTTP {last_resp.status_code} ({exc})"
+    return str(exc)
+
+
+def _fetch_cart_snapshot_safe(db: Session, client: PicnicAPI) -> CartSnapshot:
+    """Fetch Picnic cart while gracefully handling empty / 204 bodies after order submission."""
+    try:
+        cart = client.get_cart()
+        _persist_rotated_token(db, client)
+        return _extract_cart_snapshot(db, cart)
+    except Exception as exc:
+        if _is_auth_failure(exc, client):
+            raise
+        is_empty_json = isinstance(exc, (json.JSONDecodeError, ValueError)) and (
+            "expecting value" in str(exc).lower()
+        )
+        last_resp = _get_last_response(client)
+        status_code = last_resp.status_code if last_resp is not None else None
+        body_empty = (not last_resp.text.strip()) if last_resp is not None else True
+        if is_empty_json and body_empty and (status_code is None or status_code in (200, 204, 404, 410)):
+            logger.info(
+                "Picnic /cart returned empty body (status=%s); treating live cart as empty.",
+                status_code,
+            )
+            _persist_rotated_token(db, client)
+            return _save_empty_cart_snapshot(db)
+        raise
+
+
 def sync_picnic(
     db: Session,
     api: PicnicAPI | None = None,
@@ -775,6 +843,7 @@ def sync_picnic(
     db.add(run)
     db.commit()
 
+    client: PicnicAPI | None = None
     try:
         if is_demo_mode(db):
             seeded = seed_demo_picnic_data(db)
@@ -804,8 +873,22 @@ def sync_picnic(
             if existing is not None and existing.status == "COMPLETED" and existing.items:
                 continue
 
-            detail = client.get_delivery(delivery_id)
-            _persist_rotated_token(db, client)
+            try:
+                detail = client.get_delivery(delivery_id)
+                _persist_rotated_token(db, client)
+            except Exception as detail_exc:
+                if _is_auth_failure(detail_exc, client):
+                    raise
+                if isinstance(detail_exc, (json.JSONDecodeError, ValueError)) and (
+                    "expecting value" in str(detail_exc).lower()
+                ):
+                    logger.warning(
+                        "Skipping delivery %s due to empty Picnic detail response (%s).",
+                        delivery_id,
+                        _format_picnic_error(detail_exc, client),
+                    )
+                    continue
+                raise
 
             slot = getattr(detail, "slot", None) or getattr(summary, "slot", None)
             dt = (
@@ -890,9 +973,7 @@ def sync_picnic(
         recompute_product_purchase_stats(db)
         recompute_delivery_scores(db)
 
-        cart = client.get_cart()
-        _persist_rotated_token(db, client)
-        snap = _extract_cart_snapshot(db, cart)
+        snap = _fetch_cart_snapshot_safe(db, client)
 
         set_setting(db, KEY_PICNIC_AUTH_STATUS, "ok")
         run.status = "ok"
@@ -909,18 +990,19 @@ def sync_picnic(
             "cart_item_count": snap.item_count,
         }
     except Exception as exc:
-        if _is_auth_failure(exc):
+        if _is_auth_failure(exc, client):
             set_setting(db, KEY_PICNIC_AUTH_STATUS, "reauth_required")
             run.status = "reauth_required"
             run.error = "Picnic-Sitzung abgelaufen oder 2FA erneut erforderlich."
             run.finished_at = utcnow()
             db.commit()
             raise PicnicReauthRequiredError(run.error) from exc
+        err_msg = _format_picnic_error(exc, client)
         run.status = "error"
-        run.error = str(exc)[:500]
+        run.error = err_msg[:500]
         run.finished_at = utcnow()
         db.commit()
-        raise PicnicServiceError(f"Picnic-Sync fehlgeschlagen: {exc}") from exc
+        raise PicnicServiceError(f"Picnic-Sync fehlgeschlagen: {err_msg}") from exc
 
 
 def modify_cart_product(
@@ -957,12 +1039,14 @@ def modify_cart_product(
         _persist_rotated_token(db, client)
         return _extract_cart_snapshot(db, cart)
     except Exception as exc:
-        if _is_auth_failure(exc):
+        if _is_auth_failure(exc, client):
             set_setting(db, KEY_PICNIC_AUTH_STATUS, "reauth_required")
             raise PicnicReauthRequiredError(
                 "Picnic-Sitzung abgelaufen. Bitte in den Einstellungen neu anmelden."
             ) from exc
-        raise PicnicServiceError(f"Warenkorb-Änderung fehlgeschlagen: {exc}") from exc
+        raise PicnicServiceError(
+            f"Warenkorb-Änderung fehlgeschlagen: {_format_picnic_error(exc, client)}"
+        ) from exc
 
 
 def refresh_live_cart(db: Session, api: PicnicAPI | None = None) -> CartSnapshot | None:
@@ -980,17 +1064,18 @@ def refresh_live_cart(db: Session, api: PicnicAPI | None = None) -> CartSnapshot
 
     client = api or _build_api_client(db)
     try:
-        cart = client.get_cart()
-        _persist_rotated_token(db, client)
+        snap = _fetch_cart_snapshot_safe(db, client)
         set_setting(db, KEY_PICNIC_AUTH_STATUS, "ok")
-        return _extract_cart_snapshot(db, cart)
+        return snap
     except Exception as exc:
-        if _is_auth_failure(exc):
+        if _is_auth_failure(exc, client):
             set_setting(db, KEY_PICNIC_AUTH_STATUS, "reauth_required")
             raise PicnicReauthRequiredError(
                 "Picnic-Sitzung abgelaufen. Bitte in den Einstellungen neu anmelden."
             ) from exc
-        raise PicnicServiceError(f"Warenkorb-Aktualisierung fehlgeschlagen: {exc}") from exc
+        raise PicnicServiceError(
+            f"Warenkorb-Aktualisierung fehlgeschlagen: {_format_picnic_error(exc, client)}"
+        ) from exc
 
 
 def fetch_article_metadata(

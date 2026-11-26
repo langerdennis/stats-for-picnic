@@ -287,3 +287,40 @@ def test_open_delivery_resync_idempotent_purchase_count_and_snapshot_pruning(
     finally:
         db.close()
 
+
+def test_empty_cart_after_order_submission_and_empty_401_reauth(
+    temp_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    monkeypatch.setenv("DEMO_MODE", "false")
+    get_settings.cache_clear()
+
+    class SubmittedOrderClient(FakeLivePicnicClient):
+        def __init__(self, status_code: int) -> None:
+            super().__init__()
+            self.session._sfp_last_response = SimpleNamespace(status_code=status_code, text="")
+
+        def get_cart(self) -> Cart:
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    db = get_session_factory()()
+    try:
+        set_setting(db, KEY_PICNIC_AUTH_TOKEN, "tok")
+
+        # 1) HTTP 204 / empty body right after order submission -> clean empty cart snapshot (0 items)
+        res = sync_picnic(db, api=SubmittedOrderClient(status_code=204))  # type: ignore[arg-type]
+        assert res["status"] == "ok"
+        assert res["cart_item_count"] == 0
+        latest = db.query(CartSnapshot).order_by(CartSnapshot.id.desc()).first()
+        assert latest is not None
+        assert latest.item_count == 0
+        assert latest.total_price_cents == 0
+
+        # 2) HTTP 401 with empty body -> must still be detected as reauth_required!
+        with pytest.raises(PicnicReauthRequiredError):
+            sync_picnic(db, api=SubmittedOrderClient(status_code=401))  # type: ignore[arg-type]
+        assert get_picnic_status(db) == "reauth_required"
+    finally:
+        db.close()
+
