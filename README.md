@@ -93,9 +93,3 @@ npm run typecheck
 npm run build
 npm run dev
 ```
-
----
-
-## Architecture & Build Plan
-
-See [`BUILD_PLAN.md`](./BUILD_PLAN.md) for the complete architecture, SQLite schema, scoring math, enrichment pipeline, and pre-public checklist.
