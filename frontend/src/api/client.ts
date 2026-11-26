@@ -55,6 +55,13 @@ export interface BasketScoreResult {
   insight_text: string
 }
 
+export interface ScoringTargets {
+  protein_per_1000_kcal: number
+  fresh_share_pct: number
+  nova_1_2_share_pct: number
+  snack_share_pct: number
+}
+
 export interface CartQuickWin {
   picnic_id: string
   name: string
@@ -64,6 +71,27 @@ export interface CartQuickWin {
   projected_score: number
   reason: string
   image_url: string
+}
+
+export interface CartRemoveWin {
+  picnic_id: string
+  name: string
+  bucket: string
+  score_delta: number
+  projected_score: number
+  reason: string
+  image_url: string
+}
+
+export interface PicnicSearchItem {
+  picnic_id: string
+  name: string
+  unit_quantity: string | null
+  price_cents: number
+  image_url: string | null
+  bucket: string | null
+  nova_group: number | null
+  in_catalog: boolean
 }
 
 export interface WeekTrendPoint {
@@ -114,8 +142,17 @@ export interface DashboardResponse {
   live_cart_score: number | null
   live_cart_item_count: number
   live_cart_total_cents: number
+  top_cart_quick_win: CartQuickWin | null
   weekly_mealie_entries: MealiePlanEntry[]
   last_sync_at: string | null
+}
+
+export interface OIDCStatus {
+  enabled: boolean
+  authenticated: boolean
+  provider_name: string
+  user_email: string | null
+  user_name: string | null
 }
 
 export interface DeliveryItem {
@@ -165,6 +202,16 @@ export interface CartItem {
   image_url: string | null
 }
 
+export interface RestockSuggestion {
+  picnic_id: string
+  name: string
+  unit_quantity: string | null
+  bucket: string
+  image_url: string
+  hits_in_recent_deliveries: number
+  recent_deliveries_checked: number
+}
+
 export interface Cart {
   fetched_at: string | null
   total_price_cents: number
@@ -176,6 +223,8 @@ export interface Cart {
   avg_8_weeks: number | null
   is_personal_best: boolean
   quick_wins: CartQuickWin[]
+  remove_wins: CartRemoveWin[]
+  restock_suggestions: RestockSuggestion[]
 }
 
 export interface Product {
@@ -236,6 +285,13 @@ export interface SettingsStatus {
   api_key_enabled: boolean
   api_key_masked: string
   sync_interval_minutes: number
+  scoring_targets: ScoringTargets
+  oidc_enabled: boolean
+  oidc_issuer_url: string
+  oidc_client_id: string
+  oidc_has_secret: boolean
+  oidc_allowed_emails: string
+  oidc_provider_name: string
   recent_sync_runs: SyncRun[]
 }
 
@@ -251,6 +307,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let message = `HTTP ${res.status}`
     try {
       const errBody = await res.json()
+      if (res.status === 401 && errBody?.oidc_required && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sfp:oidc-required'))
+      }
       if (errBody?.detail) {
         message = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail)
       }
@@ -266,6 +325,7 @@ export const api = {
   getDashboard: () => request<DashboardResponse>('/api/v1/dashboard'),
   getDeliveries: () => request<Delivery[]>('/api/v1/deliveries'),
   getCart: () => request<Cart>('/api/v1/cart'),
+  refreshCart: () => request<Cart>('/api/v1/cart/refresh', { method: 'POST' }),
   addToCart: (product_id: string, count = 1) =>
     request<Cart>('/api/v1/cart/add', {
       method: 'POST',
@@ -276,10 +336,31 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ product_id, count }),
     }),
+  getOIDCStatus: () => request<OIDCStatus>('/api/auth/oidc/status'),
+  logoutOIDC: () => request<{ status: string }>('/api/auth/oidc/logout', { method: 'POST' }),
+  saveOIDCSettings: (payload: {
+    enabled: boolean
+    issuer_url: string
+    client_id: string
+    client_secret?: string
+    clear_client_secret?: boolean
+    allowed_emails: string
+    provider_name: string
+  }) =>
+    request<{ status: string; message: string }>('/api/v1/settings/oidc', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  testOIDC: () =>
+    request<{ status: string; issuer?: string }>('/api/v1/settings/oidc/test', {
+      method: 'POST',
+    }),
   getStaples: (filter: 'all' | 'high_protein' | 'fresh' | 'favorites' = 'all', q = '') =>
     request<Product[]>(
       `/api/v1/staples?filter=${encodeURIComponent(filter)}&q=${encodeURIComponent(q)}`,
     ),
+  searchPicnic: (q: string) =>
+    request<PicnicSearchItem[]>(`/api/v1/picnic/search?q=${encodeURIComponent(q)}`),
   getProducts: (params: { q?: string; bucket?: string; ignored?: string } = {}) => {
     const sp = new URLSearchParams()
     if (params.q) sp.set('q', params.q)
@@ -296,11 +377,19 @@ export const api = {
       bucket?: BucketType
       nova_group?: number
       is_food?: boolean
+      parsed_weight_g?: number
+      kcal_per_100g?: number
+      protein_g_per_100g?: number
+      sugar_g_per_100g?: number
     },
   ) =>
     request<Product>(`/api/v1/products/${encodeURIComponent(picnicId)}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
+    }),
+  reEnrichProduct: (picnicId: string) =>
+    request<Product>(`/api/v1/products/${encodeURIComponent(picnicId)}/re-enrich`, {
+      method: 'POST',
     }),
   enrichProductsNow: () =>
     request<{
@@ -319,6 +408,7 @@ export const api = {
     sync_interval_minutes?: number
     api_key?: string
     clear_api_key?: boolean
+    scoring_targets?: ScoringTargets
   }) =>
     request<{ status: string; message: string }>('/api/v1/settings/app', {
       method: 'PUT',

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -11,9 +18,11 @@ from app.schemas import (
     AppConfigRequest,
     LLMConfigRequest,
     MealieConfigRequest,
+    OIDCConfigRequest,
     Picnic2FAGenerateRequest,
     Picnic2FAVerifyRequest,
     PicnicLoginStartRequest,
+    ScoringTargets,
     SettingsStatusResponse,
     SyncRunOut,
 )
@@ -26,13 +35,17 @@ from app.services.mealie_service import (
     sync_mealie,
     test_mealie_connection,
 )
+from app.services.oidc_service import OIDCError, discover_oidc_provider
 from app.services.picnic_service import (
     PicnicReauthRequiredError,
     PicnicServiceError,
     clear_demo_data,
     disconnect_picnic,
     get_picnic_status,
+    get_sync_lock,
     has_pending_2fa,
+    recompute_delivery_scores,
+    recompute_latest_cart_score,
     request_2fa_code,
     seed_demo_picnic_data,
     start_login,
@@ -48,13 +61,25 @@ from app.services.settings_store import (
     KEY_LLM_USE_RESPONSES_API,
     KEY_MEALIE_API_TOKEN,
     KEY_MEALIE_URL,
+    KEY_OIDC_ALLOWED_EMAILS,
+    KEY_OIDC_CLIENT_ID,
+    KEY_OIDC_CLIENT_SECRET,
+    KEY_OIDC_ENABLED,
+    KEY_OIDC_ISSUER_URL,
+    KEY_OIDC_PROVIDER_NAME,
     KEY_PICNIC_AUTH_TOKEN,
     KEY_PICNIC_COUNTRY_CODE,
     KEY_PICNIC_USERNAME,
     KEY_SYNC_INTERVAL_MINUTES,
+    KEY_TARGET_FRESH,
+    KEY_TARGET_NOVA,
+    KEY_TARGET_PROTEIN,
+    KEY_TARGET_SNACKS,
     get_effective_api_key,
     get_effective_llm_config,
     get_effective_mealie_config,
+    get_effective_oidc_config,
+    get_effective_scoring_targets,
     get_effective_sync_interval_minutes,
     get_setting,
     is_demo_mode,
@@ -74,6 +99,8 @@ def get_settings_status(db: Session = Depends(get_db)) -> SettingsStatusResponse
     mealie_url, mealie_token = get_effective_mealie_config(db, cfg)
     llm_base, llm_key, llm_model, llm_responses = get_effective_llm_config(db, cfg)
     effective_api_key = get_effective_api_key(db, cfg)
+    scoring_targets = ScoringTargets(**get_effective_scoring_targets(db))
+    oidc_cfg = get_effective_oidc_config(db)
 
     recent_runs = list(db.scalars(select(SyncRun).order_by(desc(SyncRun.id)).limit(8)))
 
@@ -96,8 +123,72 @@ def get_settings_status(db: Session = Depends(get_db)) -> SettingsStatusResponse
         api_key_enabled=bool(effective_api_key),
         api_key_masked=mask_secret(effective_api_key),
         sync_interval_minutes=get_effective_sync_interval_minutes(db, cfg),
+        scoring_targets=scoring_targets,
+        oidc_enabled=bool(oidc_cfg["enabled"]),
+        oidc_issuer_url=str(oidc_cfg["issuer_url"]),
+        oidc_client_id=str(oidc_cfg["client_id"]),
+        oidc_has_secret=bool(oidc_cfg["client_secret"]),
+        oidc_allowed_emails=str(oidc_cfg["allowed_emails_raw"]),
+        oidc_provider_name=str(oidc_cfg["provider_name"]),
         recent_sync_runs=[SyncRunOut.model_validate(r) for r in recent_runs],
     )
+
+
+@router.put("/settings/oidc")
+async def update_oidc_settings(
+    body: OIDCConfigRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    issuer = body.issuer_url.strip().rstrip("/")
+    client_id = body.client_id.strip()
+    provider_name = body.provider_name.strip() or "PocketID"
+
+    if body.enabled:
+        if not issuer or not client_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Zum Aktivieren von OIDC sind Issuer-URL und Client-ID erforderlich.",
+            )
+        try:
+            await discover_oidc_provider(issuer, force_refresh=True)
+        except OIDCError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    set_setting(db, KEY_OIDC_ENABLED, "true" if body.enabled else "false")
+    set_setting(db, KEY_OIDC_ISSUER_URL, issuer)
+    set_setting(db, KEY_OIDC_CLIENT_ID, client_id)
+    set_setting(db, KEY_OIDC_ALLOWED_EMAILS, body.allowed_emails.strip())
+    set_setting(db, KEY_OIDC_PROVIDER_NAME, provider_name)
+    if body.clear_client_secret:
+        set_setting(db, KEY_OIDC_CLIENT_SECRET, "")
+    elif body.client_secret is not None and body.client_secret.strip() != "":
+        set_setting(db, KEY_OIDC_CLIENT_SECRET, body.client_secret.strip())
+
+    return {
+        "status": "ok",
+        "message": (
+            f"OIDC ({provider_name}) aktiviert."
+            if body.enabled
+            else "OIDC-Einstellungen gespeichert."
+        ),
+    }
+
+
+@router.post("/settings/oidc/test")
+async def test_oidc_settings(db: Session = Depends(get_db)) -> dict:
+    cfg = get_effective_oidc_config(db)
+    issuer = str(cfg["issuer_url"])
+    if not issuer:
+        raise HTTPException(status_code=400, detail="Bitte zuerst eine OIDC Issuer-URL speichern.")
+    try:
+        doc = await discover_oidc_provider(issuer, force_refresh=True)
+    except OIDCError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "ok",
+        "issuer": doc.get("issuer") or issuer,
+        "authorization_endpoint": doc.get("authorization_endpoint"),
+    }
 
 
 @router.put("/settings/app")
@@ -119,7 +210,48 @@ def update_app_settings(
     elif body.api_key is not None and body.api_key.strip() != "":
         set_setting(db, KEY_API_KEY, body.api_key.strip())
 
+    if body.scoring_targets is not None:
+        set_setting(db, KEY_TARGET_PROTEIN, str(body.scoring_targets.protein_per_1000_kcal))
+        set_setting(db, KEY_TARGET_FRESH, str(body.scoring_targets.fresh_share_pct))
+        set_setting(db, KEY_TARGET_NOVA, str(body.scoring_targets.nova_1_2_share_pct))
+        set_setting(db, KEY_TARGET_SNACKS, str(body.scoring_targets.snack_share_pct))
+        recompute_delivery_scores(db)
+        recompute_latest_cart_score(db)
+
     return {"status": "ok", "message": "App-Einstellungen gespeichert."}
+
+
+@router.get("/settings/backup")
+def download_sqlite_backup() -> Response:
+    """Create a consistent SQLite online backup (WAL-safe) and stream it as a download."""
+    db_path = get_settings().db_path
+    if not db_path.is_file():
+        raise HTTPException(status_code=404, detail="Datenbankdatei nicht gefunden.")
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(tmp_path))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        payload = tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d")
+    return Response(
+        content=payload,
+        media_type="application/x-sqlite3",
+        headers={
+            "Content-Disposition": f'attachment; filename="stats-for-picnic-backup-{stamp}.db"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/settings/demo/clear")
@@ -141,7 +273,8 @@ async def picnic_login_start(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        res = start_login(
+        res = await asyncio.to_thread(
+            start_login,
             db=db,
             country_code=body.country_code,
             username=body.username.strip(),
@@ -152,8 +285,9 @@ async def picnic_login_start(
 
     if res.get("status") == "ok":
         try:
-            sync_picnic(db)
-            await enrich_pending_products(db)
+            async with get_sync_lock():
+                await asyncio.to_thread(sync_picnic, db)
+                await enrich_pending_products(db)
             res["initial_sync"] = "ok"
             res["message"] = "Mit Picnic verbunden und erste Einkäufe geladen."
         except Exception:
@@ -162,12 +296,12 @@ async def picnic_login_start(
 
 
 @router.post("/auth/picnic/2fa/generate")
-def picnic_2fa_generate(
+async def picnic_2fa_generate(
     body: Picnic2FAGenerateRequest,
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        return request_2fa_code(db=db, channel=body.channel)
+        return await asyncio.to_thread(request_2fa_code, db=db, channel=body.channel)
     except PicnicServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -178,13 +312,14 @@ async def picnic_2fa_verify(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        res = verify_2fa_code(db=db, code=body.code)
+        res = await asyncio.to_thread(verify_2fa_code, db=db, code=body.code)
     except PicnicServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        sync_picnic(db)
-        await enrich_pending_products(db)
+        async with get_sync_lock():
+            await asyncio.to_thread(sync_picnic, db)
+            await enrich_pending_products(db)
         res["initial_sync"] = "ok"
         res["message"] = "Picnic 2FA abgeschlossen und erste Einkäufe synchronisiert."
     except Exception:
@@ -249,19 +384,24 @@ async def test_llm_settings(db: Session = Depends(get_db)) -> dict:
 
 @router.post("/sync")
 async def trigger_manual_sync(db: Session = Depends(get_db)) -> dict:
-    results: dict[str, object] = {}
-    try:
-        results["picnic"] = sync_picnic(db)
-    except PicnicReauthRequiredError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except PicnicServiceError as exc:
-        results["picnic"] = {"status": "error", "detail": str(exc)}
+    lock = get_sync_lock()
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="Ein Sync läuft bereits.")
 
-    results["enrichment"] = await enrich_pending_products(db)
+    async with lock:
+        results: dict[str, object] = {}
+        try:
+            results["picnic"] = await asyncio.to_thread(sync_picnic, db)
+        except PicnicReauthRequiredError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except PicnicServiceError as exc:
+            results["picnic"] = {"status": "error", "detail": str(exc)}
 
-    try:
-        results["mealie"] = await sync_mealie(db)
-    except MealieServiceError as exc:
-        results["mealie"] = {"status": "error", "detail": str(exc)}
+        results["enrichment"] = await enrich_pending_products(db)
 
-    return {"status": "ok", "results": results}
+        try:
+            results["mealie"] = await sync_mealie(db)
+        except MealieServiceError as exc:
+            results["mealie"] = {"status": "error", "detail": str(exc)}
+
+        return {"status": "ok", "results": results}

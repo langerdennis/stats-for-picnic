@@ -69,6 +69,13 @@ class BasketScoreResult(BaseModel):
     insight_text: str = ""
 
 
+class ScoringTargets(BaseModel):
+    protein_per_1000_kcal: float = Field(default=35.0, ge=15.0, le=80.0)
+    fresh_share_pct: float = Field(default=35.0, ge=10.0, le=70.0)
+    nova_1_2_share_pct: float = Field(default=75.0, ge=40.0, le=95.0)
+    snack_share_pct: float = Field(default=15.0, ge=0.0, le=40.0)
+
+
 class CartQuickWin(BaseModel):
     picnic_id: str
     name: str
@@ -78,6 +85,37 @@ class CartQuickWin(BaseModel):
     projected_score: int
     reason: str
     image_url: str
+
+
+class CartRemoveWin(BaseModel):
+    picnic_id: str
+    name: str
+    bucket: str
+    score_delta: int
+    projected_score: int
+    reason: str
+    image_url: str
+
+
+class RestockSuggestion(BaseModel):
+    picnic_id: str
+    name: str
+    unit_quantity: str | None = None
+    bucket: str
+    image_url: str
+    hits_in_recent_deliveries: int
+    recent_deliveries_checked: int
+
+
+class PicnicSearchItemOut(BaseModel):
+    picnic_id: str
+    name: str
+    unit_quantity: str | None = None
+    price_cents: int = 0
+    image_url: str | None = None
+    bucket: str | None = None
+    nova_group: int | None = None
+    in_catalog: bool = False
 
 
 # --- LLM structured output schemas ---
@@ -115,7 +153,7 @@ class LLMRecipeScoreResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     demo_mode: bool = False
-    version: str = "0.1.0"
+    version: str = "0.2.0"
 
 
 class ProductOut(BaseModel):
@@ -155,6 +193,7 @@ class ProductUpdateRequest(BaseModel):
     bucket: BucketType | None = None
     nova_group: int | None = Field(default=None, ge=1, le=4)
     is_food: bool | None = None
+    parsed_weight_g: float | None = Field(default=None, gt=0, le=50000)
     kcal_per_100g: float | None = Field(default=None, ge=0, le=1000)
     protein_g_per_100g: float | None = Field(default=None, ge=0, le=100)
     sugar_g_per_100g: float | None = Field(default=None, ge=0, le=100)
@@ -218,6 +257,8 @@ class CartOut(BaseModel):
     avg_8_weeks: float | None = None
     is_personal_best: bool = False
     quick_wins: list[CartQuickWin] = Field(default_factory=list)
+    remove_wins: list[CartRemoveWin] = Field(default_factory=list)
+    restock_suggestions: list[RestockSuggestion] = Field(default_factory=list)
 
 
 class CartModifyRequest(BaseModel):
@@ -273,6 +314,7 @@ class DashboardResponse(BaseModel):
     live_cart_score: int | None = None
     live_cart_item_count: int = 0
     live_cart_total_cents: int = 0
+    top_cart_quick_win: CartQuickWin | None = None
     weekly_mealie_entries: list[MealiePlanEntryOut] = Field(default_factory=list)
     last_sync_at: datetime | None = None
 
@@ -306,11 +348,22 @@ class LLMConfigRequest(BaseModel):
     llm_use_responses_api: bool = True
 
 
+class OIDCConfigRequest(BaseModel):
+    enabled: bool = False
+    issuer_url: str = ""
+    client_id: str = ""
+    client_secret: str | None = None
+    clear_client_secret: bool = False
+    allowed_emails: str = ""
+    provider_name: str = "PocketID"
+
+
 class AppConfigRequest(BaseModel):
     demo_mode: bool | None = None
     sync_interval_minutes: int | None = Field(default=None, ge=0, le=1440)
     api_key: str | None = None
     clear_api_key: bool = False
+    scoring_targets: ScoringTargets | None = None
 
 
 class SyncRunOut(BaseModel):
@@ -344,6 +397,13 @@ class SettingsStatusResponse(BaseModel):
     api_key_enabled: bool
     api_key_masked: str
     sync_interval_minutes: int
+    scoring_targets: ScoringTargets = Field(default_factory=ScoringTargets)
+    oidc_enabled: bool = False
+    oidc_issuer_url: str = ""
+    oidc_client_id: str = ""
+    oidc_has_secret: bool = False
+    oidc_allowed_emails: str = ""
+    oidc_provider_name: str = "PocketID"
     recent_sync_runs: list[SyncRunOut] = Field(default_factory=list)
 
 
@@ -381,6 +441,9 @@ class TesseraeMealieToday(BaseModel):
 class TesseraeSummaryResponse(BaseModel):
     updated_at: str
     picnic_status: str
+    picnic_reauth_required: bool = False
+    next_delivery_slot: str | None = None
+    healthy_streak_weeks: int = 0
     current_week: TesseraeCurrentWeek | None = None
     live_cart: TesseraeLiveCart | None = None
     trend_8_weeks: list[TesseraeTrendPoint] = Field(default_factory=list)

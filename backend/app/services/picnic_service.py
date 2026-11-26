@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from typing import Any
 
 import requests
 from python_picnic_api2 import Picnic2FAError, Picnic2FARequired, PicnicAPI, PicnicAuthError
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -21,7 +22,7 @@ from app.models import (
     SyncRun,
     utcnow,
 )
-from app.schemas import BasketScoreResult
+from app.schemas import BasketScoreResult, PicnicSearchItemOut, ScoringTargets
 from app.services.demo_data import (
     DEMO_INITIAL_CART,
     DEMO_PRODUCT_MAP,
@@ -41,12 +42,22 @@ from app.services.settings_store import (
     KEY_PICNIC_COUNTRY_CODE,
     KEY_PICNIC_USERNAME,
     delete_setting,
+    get_effective_scoring_targets,
     get_setting,
     is_demo_mode,
     set_setting,
 )
 
 logger = logging.getLogger("stats_for_picnic.picnic")
+
+_sync_lock: asyncio.Lock | None = None
+
+
+def get_sync_lock() -> asyncio.Lock:
+    global _sync_lock
+    if _sync_lock is None:
+        _sync_lock = asyncio.Lock()
+    return _sync_lock
 
 
 class PicnicServiceError(Exception):
@@ -322,8 +333,37 @@ def product_to_scorable(product: Product, quantity: int, price_cents: int) -> Sc
     )
 
 
+def recompute_product_purchase_stats(db: Session) -> None:
+    """Idempotently recompute purchase_count and last_purchased_at from delivery_items."""
+    rows = db.execute(
+        select(
+            DeliveryItem.picnic_id,
+            func.coalesce(func.sum(DeliveryItem.quantity), 0),
+            func.max(Delivery.delivery_time),
+        )
+        .join(Delivery, DeliveryItem.delivery_id == Delivery.delivery_id)
+        .group_by(DeliveryItem.picnic_id)
+    ).all()
+    stats_by_id = {pid: (int(total_qty), last_dt) for pid, total_qty, last_dt in rows}
+    for product in db.scalars(select(Product)):
+        total_qty, last_dt = stats_by_id.get(product.picnic_id, (0, None))
+        product.purchase_count = total_qty
+        product.last_purchased_at = last_dt
+    db.commit()
+
+
+def _prune_old_cart_snapshots(db: Session, keep: int = 10) -> None:
+    """Keep only the most recent `keep` CartSnapshot rows to prevent unbounded SQLite growth."""
+    keep_ids = list(
+        db.scalars(select(CartSnapshot.id).order_by(desc(CartSnapshot.id)).limit(keep))
+    )
+    if keep_ids:
+        db.execute(delete(CartSnapshot).where(CartSnapshot.id.notin_(keep_ids)))
+
+
 def recompute_delivery_scores(db: Session, delivery_id: str | None = None) -> int:
     """Recompute cached scoring metrics for one or all deliveries."""
+    targets = ScoringTargets(**get_effective_scoring_targets(db))
     stmt = select(Delivery)
     if delivery_id:
         stmt = stmt.where(Delivery.delivery_id == delivery_id)
@@ -336,7 +376,7 @@ def recompute_delivery_scores(db: Session, delivery_id: str | None = None) -> in
             if product is None:
                 continue
             scorable.append(product_to_scorable(product, line.quantity, line.price_cents))
-        result = score_basket(scorable)
+        result = score_basket(scorable, targets=targets)
         delivery.score = float(result.score)
         delivery.protein_per_1000_kcal = result.protein_per_1000_kcal
         delivery.fresh_share_pct = result.fresh_share_pct
@@ -351,6 +391,7 @@ def recompute_latest_cart_score(db: Session) -> BasketScoreResult | None:
     snap = db.scalar(select(CartSnapshot).order_by(desc(CartSnapshot.id)).limit(1))
     if snap is None:
         return None
+    targets = ScoringTargets(**get_effective_scoring_targets(db))
     raw_items = json.loads(snap.items_json or "[]")
     scorable: list[ScorableItem] = []
     for entry in raw_items:
@@ -364,7 +405,7 @@ def recompute_latest_cart_score(db: Session) -> BasketScoreResult | None:
                 price_cents=int(entry.get("price_cents", 0)),
             )
         )
-    result = score_basket(scorable)
+    result = score_basket(scorable, targets=targets)
     snap.computed_metrics_json = result.model_dump_json()
     db.commit()
     return result
@@ -527,7 +568,8 @@ def _save_demo_cart(db: Session, items: list[tuple[str, int]]) -> CartSnapshot:
         )
         scorable.append(product_to_scorable(product, qty, line_price))
 
-    metrics = score_basket(scorable)
+    targets = ScoringTargets(**get_effective_scoring_targets(db))
+    metrics = score_basket(scorable, targets=targets)
     next_slot = (utcnow() + timedelta(days=2)).replace(hour=16, minute=0, second=0, microsecond=0)
     snap = CartSnapshot(
         fetched_at=utcnow(),
@@ -538,6 +580,8 @@ def _save_demo_cart(db: Session, items: list[tuple[str, int]]) -> CartSnapshot:
         computed_metrics_json=metrics.model_dump_json(),
     )
     db.add(snap)
+    db.flush()
+    _prune_old_cart_snapshots(db)
     db.commit()
     db.refresh(snap)
     return snap
@@ -601,7 +645,8 @@ def _extract_cart_snapshot(db: Session, cart: Any) -> CartSnapshot:
         or sum(i["price_cents"] for i in items_serialized)
     )
     cart_item_count = getattr(cart, "total_count", None) or total_count
-    metrics = score_basket(scorable)
+    targets = ScoringTargets(**get_effective_scoring_targets(db))
+    metrics = score_basket(scorable, targets=targets)
 
     snap = CartSnapshot(
         fetched_at=utcnow(),
@@ -612,6 +657,8 @@ def _extract_cart_snapshot(db: Session, cart: Any) -> CartSnapshot:
         computed_metrics_json=metrics.model_dump_json(),
     )
     db.add(snap)
+    db.flush()
+    _prune_old_cart_snapshots(db)
     db.commit()
     db.refresh(snap)
     return snap
@@ -720,7 +767,7 @@ def sync_picnic(
                             unit_quantity=uq,
                             image_id=img_id,
                             purchased_at=dt,
-                            increment_purchase=qty,
+                            increment_purchase=0,
                         )
                         db.flush()
                         db.add(
@@ -739,6 +786,7 @@ def sync_picnic(
             synced_deliveries += 1
 
         db.commit()
+        recompute_product_purchase_stats(db)
         recompute_delivery_scores(db)
 
         cart = client.get_cart()
@@ -814,6 +862,34 @@ def modify_cart_product(
                 "Picnic-Sitzung abgelaufen. Bitte in den Einstellungen neu anmelden."
             ) from exc
         raise PicnicServiceError(f"Warenkorb-Änderung fehlgeschlagen: {exc}") from exc
+
+
+def refresh_live_cart(db: Session, api: PicnicAPI | None = None) -> CartSnapshot | None:
+    """Fast cart-only refresh without syncing historical deliveries or Mealie."""
+    if is_demo_mode(db):
+        snap = db.scalar(select(CartSnapshot).order_by(desc(CartSnapshot.id)).limit(1))
+        if snap is None:
+            seed_demo_picnic_data(db)
+            snap = db.scalar(select(CartSnapshot).order_by(desc(CartSnapshot.id)).limit(1))
+        if snap is not None:
+            snap.fetched_at = utcnow()
+            db.commit()
+            db.refresh(snap)
+        return snap
+
+    client = api or _build_api_client(db)
+    try:
+        cart = client.get_cart()
+        _persist_rotated_token(db, client)
+        set_setting(db, KEY_PICNIC_AUTH_STATUS, "ok")
+        return _extract_cart_snapshot(db, cart)
+    except Exception as exc:
+        if _is_auth_failure(exc):
+            set_setting(db, KEY_PICNIC_AUTH_STATUS, "reauth_required")
+            raise PicnicReauthRequiredError(
+                "Picnic-Sitzung abgelaufen. Bitte in den Einstellungen neu anmelden."
+            ) from exc
+        raise PicnicServiceError(f"Warenkorb-Aktualisierung fehlgeschlagen: {exc}") from exc
 
 
 def fetch_article_metadata(
@@ -900,4 +976,82 @@ async def get_or_fetch_product_image(db: Session, picnic_id: str) -> tuple[bytes
             logger.debug("Picnic image fetch skipped for %s: %s", picnic_id, exc)
 
     return _build_product_fallback_svg(product.name, product.bucket), "image/svg+xml"
+
+
+def search_picnic_products(
+    db: Session,
+    query: str,
+    limit: int = 15,
+    api: PicnicAPI | None = None,
+) -> list[PicnicSearchItemOut]:
+    """Search Picnic live catalog (or Demo catalog in DEMO_MODE) for adding items to cart."""
+    needle = query.strip()
+    if not needle:
+        return []
+
+    if is_demo_mode(db):
+        lower_q = needle.lower()
+        results: list[PicnicSearchItemOut] = []
+        for spec in DEMO_PRODUCTS:
+            if lower_q in spec.name.lower() or lower_q in spec.picnic_category.lower():
+                existing = db.get(Product, spec.picnic_id)
+                results.append(
+                    PicnicSearchItemOut(
+                        picnic_id=spec.picnic_id,
+                        name=spec.name,
+                        unit_quantity=spec.unit_quantity,
+                        price_cents=spec.price_cents,
+                        image_url=f"/api/v1/products/{spec.picnic_id}/image",
+                        bucket=existing.bucket if existing else spec.bucket,
+                        nova_group=existing.nova_group if existing else spec.nova_group,
+                        in_catalog=existing is not None,
+                    )
+                )
+        return results[:limit]
+
+    client = api or _build_api_client(db)
+    try:
+        search_res = client.search(needle)
+        _persist_rotated_token(db, client)
+    except Exception as exc:
+        if _is_auth_failure(exc):
+            set_setting(db, KEY_PICNIC_AUTH_STATUS, "reauth_required")
+            raise PicnicReauthRequiredError(
+                "Picnic-Sitzung abgelaufen. Bitte in den Einstellungen neu anmelden."
+            ) from exc
+        raise PicnicServiceError(f"Picnic-Suche fehlgeschlagen: {exc}") from exc
+
+    country = (get_setting(db, KEY_PICNIC_COUNTRY_CODE, "DE") or "DE").lower()
+    out: list[PicnicSearchItemOut] = []
+    for item in (getattr(search_res, "items", None) or [])[:limit]:
+        pid = getattr(item, "id", None)
+        name = getattr(item, "name", None)
+        if not pid or not name:
+            continue
+        existing = db.get(Product, pid)
+        img_id = getattr(item, "image_id", None)
+        image_url: str | None
+        if existing is not None:
+            image_url = f"/api/v1/products/{pid}/image"
+        elif img_id:
+            image_url = (
+                f"https://storefront-prod.{country}.picnicinternational.com"
+                f"/static/images/{img_id}/small.png"
+            )
+        else:
+            image_url = None
+        out.append(
+            PicnicSearchItemOut(
+                picnic_id=pid,
+                name=name,
+                unit_quantity=getattr(item, "unit_quantity", None),
+                price_cents=int(getattr(item, "display_price", 0) or 0),
+                image_url=image_url,
+                bucket=existing.bucket if existing else None,
+                nova_group=existing.nova_group if existing else None,
+                in_catalog=existing is not None,
+            )
+        )
+    return out
+
 

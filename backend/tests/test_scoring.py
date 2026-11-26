@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from app.schemas import ScoringTargets
 from app.services.scoring import (
     ScorableItem,
     compute_cart_quick_wins,
+    compute_cart_remove_wins,
     compute_healthy_streak,
     compute_rolling_average_and_delta,
     parse_weight_grams,
@@ -161,4 +163,35 @@ def test_healthy_streak_tier_and_quick_wins() -> None:
     assert len(wins) == 2
     assert all(w.score_delta > 0 for w in wins)
     assert all(w.projected_score > res.score for w in wins)
+
+
+def test_pantry_oil_cap_custom_targets_and_remove_wins() -> None:
+    # Buying a 500 ml bottle of olive oil should behave identically to 120 g weekly share
+    base = [
+        _item("skyr", "Skyr", bucket="protein", weight_g=500, kcal=63, protein=11, sugar=4, nova=1),
+        _item("brok", "Brokkoli", bucket="produce", weight_g=500, kcal=34, protein=2.8, sugar=1.7, nova=1),
+    ]
+    oil_500 = _item("oil", "Olivenöl", bucket="staple", weight_g=500, kcal=824, protein=0, sugar=0, nova=2)
+    oil_120 = _item("oil", "Olivenöl", bucket="staple", weight_g=120, kcal=824, protein=0, sugar=0, nova=2)
+
+    r500 = score_basket([*base, oil_500])
+    r120 = score_basket([*base, oil_120])
+    assert r500.score == r120.score
+    assert r500.protein_per_1000_kcal == r120.protein_per_1000_kcal
+
+    # Custom stricter targets affect goal checkmarks & score
+    relaxed = score_basket([*base, oil_120], targets=ScoringTargets(protein_per_1000_kcal=25.0))
+    strict = score_basket([*base, oil_120], targets=ScoringTargets(protein_per_1000_kcal=75.0))
+    assert strict.score <= relaxed.score
+
+    # Detractor remove quick-win
+    with_chips = [
+        *base,
+        _item("chips", "Kartoffelchips", bucket="treat_snack", weight_g=350, kcal=536, protein=6, sugar=3, nova=4),
+    ]
+    rem_wins = compute_cart_remove_wins(with_chips, max_results=2)
+    assert len(rem_wins) == 1
+    assert rem_wins[0].picnic_id == "chips"
+    assert rem_wins[0].score_delta > 0
+
 

@@ -7,9 +7,11 @@ from datetime import datetime
 from app.schemas import (
     BasketScoreResult,
     CartQuickWin,
+    CartRemoveWin,
     GoalCheck,
     QualityTier,
     ScoreDriver,
+    ScoringTargets,
     SubScores,
 )
 
@@ -154,8 +156,12 @@ def _is_snack_or_sugary(item: ScorableItem, sugar: float) -> bool:
     return bool(item.bucket != "produce" and sugar >= 22.0)
 
 
-def score_basket(items: list[ScorableItem]) -> BasketScoreResult:
+def score_basket(
+    items: list[ScorableItem],
+    targets: ScoringTargets | None = None,
+) -> BasketScoreResult:
     """Compute pure, deterministic, multi-person-safe ratios & 0-100 quality score."""
+    cfg_targets = targets or ScoringTargets()
     included_count = 0
     ignored_count = 0
 
@@ -196,9 +202,15 @@ def score_basket(items: list[ScorableItem]) -> BasketScoreResult:
             # Price-weighted fallback (~100g per EUR)
             unit_g = max(100.0, (item.price_cents / 100.0) * 100.0)
 
-        # Cap single beverage line weight to avoid 6-pack juice dominating solid foods
         weight_g = unit_g * qty
-        effective_weight_g = min(weight_g, 1500.0) if item.bucket == "beverage" else weight_g
+        # Cap beverage packs (avoid 6-pack juice dominating solid foods) and multi-week pantry oils
+        # (avoid a 500 ml bottle of olive oil skewing a single week's kcal/protein density).
+        if item.bucket == "beverage":
+            effective_weight_g = min(weight_g, 1500.0)
+        elif item.bucket == "staple" and kcal >= 650.0:
+            effective_weight_g = min(weight_g, 120.0)
+        else:
+            effective_weight_g = weight_g
 
         total_food_weight_g += effective_weight_g
         total_kcal += (effective_weight_g / 100.0) * kcal
@@ -314,15 +326,20 @@ def score_basket(items: list[ScorableItem]) -> BasketScoreResult:
     nova_1_2_share_pct = (nova_1_2_weight_g / total_food_weight_g) * 100.0
     snack_share_pct = (snack_weight_g / total_food_weight_g) * 100.0
 
-    # Transparent sub-scores (each 0-100):
-    # 1) Protein Density: 12 g -> 0, 46 g -> 100 (target ~35-45 g / 1000 kcal)
-    protein_score = _clamp(((protein_per_1000_kcal - 12.0) / 34.0) * 100.0)
-    # 2) Fresh & Produce Share: 0% -> 0, 42% -> 100 (target >= 35-45%)
-    fresh_score = _clamp((fresh_share_pct / 42.0) * 100.0)
-    # 3) Unprocessed Share (NOVA 1-2): 20% -> 0, 82% -> 100 (target >= 75%)
-    nova_score = _clamp(((nova_1_2_share_pct - 20.0) / 62.0) * 100.0)
-    # 4) Low Snack/Sugar Share: <= 5% -> 100, >= 45% -> 0 (target <= 15%)
-    snack_score = _clamp(100.0 - ((max(0.0, snack_share_pct - 5.0)) / 40.0) * 100.0)
+    # Transparent sub-scores (each 0-100), smoothly scaled around configurable targets:
+    # 1) Protein Density: floor 12 g -> 0, target + 11 g -> 100 (default target 35 -> max 46)
+    protein_ceiling = max(25.0, cfg_targets.protein_per_1000_kcal + 11.0)
+    protein_score = _clamp(((protein_per_1000_kcal - 12.0) / (protein_ceiling - 12.0)) * 100.0)
+    # 2) Fresh & Produce Share: 0% -> 0, target + 7% -> 100 (default target 35 -> max 42)
+    fresh_ceiling = max(20.0, cfg_targets.fresh_share_pct + 7.0)
+    fresh_score = _clamp((fresh_share_pct / fresh_ceiling) * 100.0)
+    # 3) Unprocessed Share (NOVA 1-2): 20% -> 0, target + 7% -> 100 (default target 75 -> max 82)
+    nova_ceiling = min(100.0, max(50.0, cfg_targets.nova_1_2_share_pct + 7.0))
+    nova_score = _clamp(((nova_1_2_share_pct - 20.0) / (nova_ceiling - 20.0)) * 100.0)
+    # 4) Low Snack/Sugar Share: <= max(0, target-10)% -> 100, >= target+30% -> 0
+    snack_zero_pen = max(0.0, cfg_targets.snack_share_pct - 10.0)
+    snack_span = 40.0
+    snack_score = _clamp(100.0 - ((max(0.0, snack_share_pct - snack_zero_pen)) / snack_span) * 100.0)
 
     combined = (
         0.30 * protein_score
@@ -330,7 +347,7 @@ def score_basket(items: list[ScorableItem]) -> BasketScoreResult:
         + 0.25 * nova_score
         + 0.20 * snack_score
     )
-    final_score = int(round(_clamp(combined)))
+    final_score = round(_clamp(combined))
 
     pos_candidates.sort(key=lambda pair: pair[0], reverse=True)
     neg_candidates.sort(key=lambda pair: pair[0], reverse=True)
@@ -352,6 +369,7 @@ def score_basket(items: list[ScorableItem]) -> BasketScoreResult:
         fresh_share_pct,
         nova_1_2_share_pct,
         snack_share_pct,
+        cfg_targets,
     )
 
     return BasketScoreResult(
@@ -382,31 +400,32 @@ def _build_quality_tier(
     fresh_share: float,
     nova_1_2: float,
     snack_share: float,
+    targets: ScoringTargets,
 ) -> QualityTier:
     goals = [
         GoalCheck(
             key="protein",
             label="Protein-Ziel",
-            met=protein_density >= 35.0,
-            detail="≥ 35 g / 1.000 kcal",
+            met=protein_density >= targets.protein_per_1000_kcal,
+            detail=f"≥ {targets.protein_per_1000_kcal:.0f} g / 1.000 kcal",
         ),
         GoalCheck(
             key="fresh",
             label="Frisch-Ziel",
-            met=fresh_share >= 35.0,
-            detail="≥ 35 % Obst & Gemüse",
+            met=fresh_share >= targets.fresh_share_pct,
+            detail=f"≥ {targets.fresh_share_pct:.0f} % Obst & Gemüse",
         ),
         GoalCheck(
             key="nova",
             label="NOVA 1–2",
-            met=nova_1_2 >= 75.0,
-            detail="≥ 75 % unverarbeitet",
+            met=nova_1_2 >= targets.nova_1_2_share_pct,
+            detail=f"≥ {targets.nova_1_2_share_pct:.0f} % unverarbeitet",
         ),
         GoalCheck(
             key="snacks",
             label="Wenig Snacks",
-            met=snack_share <= 15.0,
-            detail="≤ 15 % Snacks & Zucker",
+            met=snack_share <= targets.snack_share_pct,
+            detail=f"≤ {targets.snack_share_pct:.0f} % Snacks & Zucker",
         ),
     ]
     goals_met = sum(1 for g in goals if g.met)
@@ -481,12 +500,13 @@ def compute_cart_quick_wins(
     current_items: list[ScorableItem],
     candidates: list[ScorableItem],
     max_results: int = 3,
+    targets: ScoringTargets | None = None,
 ) -> list[CartQuickWin]:
     """Deterministically simulate +1 of past healthy staples to find top score boosters."""
     if not current_items or not candidates:
         return []
 
-    base_res = score_basket(current_items)
+    base_res = score_basket(current_items, targets=targets)
     if base_res.score >= 98:
         return []
 
@@ -502,12 +522,11 @@ def compute_cart_quick_wins(
             continue
         if cand.bucket not in ("protein", "produce", "whole_food"):
             continue
-        # Avoid suggesting items already in cart with qty >= 2
         if in_cart_qty.get(cand.picnic_id, 0) >= 2:
             continue
         seen_ids.add(cand.picnic_id)
 
-        simulated = score_basket([*current_items, cand])
+        simulated = score_basket([*current_items, cand], targets=targets)
         delta = simulated.score - base_res.score
         if delta <= 0:
             continue
@@ -519,7 +538,6 @@ def compute_cart_quick_wins(
         else:
             reason = "Stärkt NOVA 1–2 Anteil"
 
-        # Prefer items not yet in cart as tie-breaker
         not_in_cart_bonus = 1 if cand.picnic_id not in in_cart_qty else 0
         ranked.append(
             (
@@ -540,6 +558,84 @@ def compute_cart_quick_wins(
 
     ranked.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return [item for _, _, item in ranked[:max_results]]
+
+
+def compute_cart_remove_wins(
+    current_items: list[ScorableItem],
+    max_results: int = 2,
+    targets: ScoringTargets | None = None,
+) -> list[CartRemoveWin]:
+    """Deterministically simulate -1 of active cart detractors to show score upside."""
+    if len(current_items) < 2:
+        return []
+
+    base_res = score_basket(current_items, targets=targets)
+    if base_res.score >= 98:
+        return []
+
+    ranked: list[tuple[int, CartRemoveWin]] = []
+    for idx, item in enumerate(current_items):
+        if not item.is_food or item.ignored or item.bucket == "household":
+            continue
+        sugar = item.sugar_g_per_100g or 0.0
+        is_detractor = _is_snack_or_sugary(item, sugar) or item.nova_group == 4
+        if not is_detractor:
+            continue
+
+        # Simulate quantity - 1 (or removing the line item if quantity == 1)
+        next_items: list[ScorableItem] = []
+        for j, other in enumerate(current_items):
+            if j != idx:
+                next_items.append(other)
+            elif other.quantity > 1:
+                next_items.append(
+                    ScorableItem(
+                        picnic_id=other.picnic_id,
+                        name=other.name,
+                        quantity=other.quantity - 1,
+                        price_cents=int(other.price_cents * (other.quantity - 1) / other.quantity),
+                        unit_quantity=other.unit_quantity,
+                        parsed_weight_g=other.parsed_weight_g,
+                        is_food=other.is_food,
+                        ignored=other.ignored,
+                        bucket=other.bucket,
+                        kcal_per_100g=other.kcal_per_100g,
+                        protein_g_per_100g=other.protein_g_per_100g,
+                        sugar_g_per_100g=other.sugar_g_per_100g,
+                        fiber_g_per_100g=other.fiber_g_per_100g,
+                        nova_group=other.nova_group,
+                    )
+                )
+
+        if not next_items:
+            continue
+        simulated = score_basket(next_items, targets=targets)
+        delta = simulated.score - base_res.score
+        if delta <= 0:
+            continue
+
+        reason = (
+            "Senkt Snack-/Zuckeranteil"
+            if _is_snack_or_sugary(item, sugar)
+            else "Weniger NOVA 4 im Korb"
+        )
+        ranked.append(
+            (
+                delta,
+                CartRemoveWin(
+                    picnic_id=item.picnic_id,
+                    name=item.name,
+                    bucket=item.bucket,
+                    score_delta=delta,
+                    projected_score=simulated.score,
+                    reason=reason,
+                    image_url=f"/api/v1/products/{item.picnic_id}/image",
+                ),
+            )
+        )
+
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    return [item for _, item in ranked[:max_results]]
 
 
 def iso_week_str(dt: datetime) -> str:

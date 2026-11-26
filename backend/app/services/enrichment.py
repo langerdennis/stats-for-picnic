@@ -90,6 +90,7 @@ async def enrich_pending_products(
     db: Session,
     *,
     limit: int = 100,
+    picnic_ids: list[str] | None = None,
     off_client: httpx.AsyncClient | None = None,
     llm_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
@@ -108,18 +109,21 @@ async def enrich_pending_products(
     }
 
     try:
-        pending = list(
-            db.scalars(
-                select(Product)
-                .where(Product.enrichment_source == "pending")
-                .limit(limit)
-            )
-        )
+        stmt = select(Product).where(Product.enrichment_source == "pending")
+        if picnic_ids:
+            stmt = stmt.where(Product.picnic_id.in_(picnic_ids))
+        pending = list(db.scalars(stmt.limit(limit)))
 
         llm_queue: list[Product] = []
 
         live_picnic_ready = not is_demo_mode(db) and get_picnic_status(db) == "ok"
 
+        import asyncio
+
+        from app.services.openfoodfacts import OFF_USER_AGENT
+
+        # Step 1: Filter manual overrides, fetch one-time Picnic metadata (off event loop), and apply non-food rules
+        off_candidates: list[Product] = []
         for product in pending:
             if product.manual_override:
                 stats["skipped_manual"] += 1
@@ -127,9 +131,10 @@ async def enrich_pending_products(
 
             stats["processed"] += 1
 
-            # One-time article metadata lookup (category + GTIN) for brand-new live Picnic products
             if live_picnic_ready and not product.picnic_category and not product.gtin:
-                cat_name, gtin_val = fetch_article_metadata(db, product.picnic_id)
+                cat_name, gtin_val = await asyncio.to_thread(
+                    fetch_article_metadata, db, product.picnic_id
+                )
                 if cat_name:
                     product.picnic_category = cat_name
                 if gtin_val:
@@ -147,35 +152,55 @@ async def enrich_pending_products(
                 stats["rule_non_food"] += 1
                 continue
 
-            # Stage 1: OpenFoodFacts
-            off_hit = await lookup_product_openfoodfacts(
-                name=product.name,
-                gtin=product.gtin,
-                client=off_client,
+            off_candidates.append(product)
+
+        # Stage 1: OpenFoodFacts with shared AsyncClient + bounded concurrency (Semaphore 5)
+        if off_candidates:
+            close_off = off_client is None
+            shared_off = off_client or httpx.AsyncClient(
+                timeout=8.0,
+                headers={"User-Agent": OFF_USER_AGENT},
             )
-            if off_hit is not None:
-                product.is_food = off_hit.bucket != "household"
-                product.bucket = off_hit.bucket
-                product.kcal_per_100g = off_hit.kcal_per_100g
-                product.protein_g_per_100g = off_hit.protein_g_per_100g
-                product.carbs_g_per_100g = off_hit.carbs_g_per_100g
-                product.sugar_g_per_100g = off_hit.sugar_g_per_100g
-                product.fat_g_per_100g = off_hit.fat_g_per_100g
-                product.fiber_g_per_100g = off_hit.fiber_g_per_100g
-                if off_hit.nova_group is not None:
-                    product.nova_group = off_hit.nova_group
-                product.nutriscore_grade = off_hit.nutriscore_grade
-                if off_hit.gtin and not product.gtin:
-                    product.gtin = off_hit.gtin
-                product.parsed_weight_g = parse_weight_grams(
-                    product.unit_quantity, product.bucket, product.name
-                )
-                product.enrichment_source = "openfoodfacts"
-                product.enrichment_confidence = off_hit.confidence
-                product.enriched_at = utcnow()
-                stats["openfoodfacts"] += 1
-            else:
-                llm_queue.append(product)
+            sem = asyncio.Semaphore(5)
+
+            async def _lookup_one(prod: Product):
+                async with sem:
+                    return prod, await lookup_product_openfoodfacts(
+                        name=prod.name,
+                        gtin=prod.gtin,
+                        client=shared_off,
+                    )
+
+            try:
+                off_results = await asyncio.gather(*(_lookup_one(p) for p in off_candidates))
+            finally:
+                if close_off:
+                    await shared_off.aclose()
+
+            for product, off_hit in off_results:
+                if off_hit is not None:
+                    product.is_food = off_hit.bucket != "household"
+                    product.bucket = off_hit.bucket
+                    product.kcal_per_100g = off_hit.kcal_per_100g
+                    product.protein_g_per_100g = off_hit.protein_g_per_100g
+                    product.carbs_g_per_100g = off_hit.carbs_g_per_100g
+                    product.sugar_g_per_100g = off_hit.sugar_g_per_100g
+                    product.fat_g_per_100g = off_hit.fat_g_per_100g
+                    product.fiber_g_per_100g = off_hit.fiber_g_per_100g
+                    if off_hit.nova_group is not None:
+                        product.nova_group = off_hit.nova_group
+                    product.nutriscore_grade = off_hit.nutriscore_grade
+                    if off_hit.gtin and not product.gtin:
+                        product.gtin = off_hit.gtin
+                    product.parsed_weight_g = parse_weight_grams(
+                        product.unit_quantity, product.bucket, product.name
+                    )
+                    product.enrichment_source = "openfoodfacts"
+                    product.enrichment_confidence = off_hit.confidence
+                    product.enriched_at = utcnow()
+                    stats["openfoodfacts"] += 1
+                else:
+                    llm_queue.append(product)
 
         db.commit()
 

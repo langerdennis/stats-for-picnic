@@ -93,3 +93,11 @@ npm run typecheck
 npm run build
 npm run dev
 ```
+
+---
+
+## Security Note
+
+- **Built-in OIDC / PocketID Protection (Optional):** Protect the shared household Web-UI directly via OpenID Connect (Authorization Code + PKCE `S256`, works with **PocketID**, Authentik, Authelia, Keycloak, etc.) under **Einstellungen → Zugriffsschutz (OIDC / PocketID)**. Supports an optional comma-separated email allowlist (e.g. for you and your partner) without adding multi-user complexity. If you ever lock yourself out, set `OIDC_DISABLE=true` on the container to temporarily bypass OIDC and adjust your settings.
+- **API-Key for External Widgets:** The optional **API-Key** protects `/api/v1/summary` and `/widget/eink` independently of browser OIDC sessions, so Tesserae E-Ink frames and Home Assistant continue working seamlessly even when OIDC login is enabled.
+- If you do not enable OIDC, run **Stats for Picnic** on your private home network / Tailscale or behind reverse-proxy authentication.

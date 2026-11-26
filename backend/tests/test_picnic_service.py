@@ -242,3 +242,48 @@ def test_picnic_auth_expiry_marks_reauth_required(
         assert get_picnic_status(db) == "reauth_required"
     finally:
         db.close()
+
+
+def test_open_delivery_resync_idempotent_purchase_count_and_snapshot_pruning(
+    temp_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEMO_MODE", "false")
+    get_settings.cache_clear()
+
+    class OpenDeliveryClient(FakeLivePicnicClient):
+        def get_deliveries(self, summary: bool = True) -> list[DeliverySummary]:
+            return [
+                DeliverySummary(
+                    delivery_id="del-open-1",
+                    status="CURRENT",
+                    slot=Slot(window_start="2026-11-28T17:00:00+01:00"),
+                )
+            ]
+
+        def get_delivery(self, delivery_id: str) -> Delivery:
+            d = super().get_delivery(delivery_id)
+            d.status = "CURRENT"
+            return d
+
+    db = get_session_factory()()
+    try:
+        set_setting(db, KEY_PICNIC_AUTH_TOKEN, "tok")
+        fake_api = OpenDeliveryClient()
+
+        # Sync the same still-open delivery 3 times -> purchase_count must stay 2, not 6!
+        for _ in range(3):
+            sync_picnic(db, api=fake_api)  # type: ignore[arg-type]
+
+        skyr = db.get(Product, "s_skyr")
+        assert skyr is not None
+        assert skyr.purchase_count == 2
+
+        # Trigger 12 more cart updates -> cart_snapshots must stay pruned to <= 10 rows
+        for _ in range(12):
+            modify_cart_product(db, product_id="s_skyr", count=1, action="add", api=fake_api)  # type: ignore[arg-type]
+
+        snap_count = db.query(CartSnapshot).count()
+        assert snap_count <= 10
+    finally:
+        db.close()
+

@@ -10,6 +10,8 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+APP_VERSION = "0.2.0"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -25,6 +27,7 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = 60
     secret_key: str = ""
     static_dir: str = ""
+    oidc_disable: bool = False
 
     # LLM (OpenAI-compatible; default DeepSeek Flash)
     llm_base_url: str = "https://api.deepseek.com"

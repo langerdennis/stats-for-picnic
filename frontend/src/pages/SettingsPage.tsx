@@ -3,9 +3,11 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Download,
   KeyRound,
   Monitor,
   RefreshCw,
+  ShieldCheck,
   Sliders,
   Sparkles,
   Trash2,
@@ -14,7 +16,7 @@ import {
   Wand2,
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
-import { api, type SettingsStatus } from '../api/client'
+import { api, type ScoringTargets, type SettingsStatus } from '../api/client'
 
 interface Props {
   onDemoModeChange?: (demo: boolean) => void
@@ -83,7 +85,7 @@ function CollapsibleCard({
   )
 }
 
-type SectionKey = 'app' | 'picnic' | 'llm' | 'mealie' | 'tesserae'
+type SectionKey = 'app' | 'picnic' | 'oidc' | 'llm' | 'mealie' | 'tesserae'
 
 export function SettingsPage({ onDemoModeChange }: Props) {
   const [status, setStatus] = useState<SettingsStatus | null>(null)
@@ -92,6 +94,7 @@ export function SettingsPage({ onDemoModeChange }: Props) {
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({
     app: true,
     picnic: true,
+    oidc: false,
     llm: false,
     mealie: false,
     tesserae: false,
@@ -101,6 +104,12 @@ export function SettingsPage({ onDemoModeChange }: Props) {
   const [demoMode, setDemoMode] = useState(false)
   const [syncInterval, setSyncInterval] = useState(60)
   const [apiKeyInput, setApiKeyInput] = useState('')
+  const [scoringTargets, setScoringTargets] = useState<ScoringTargets>({
+    protein_per_1000_kcal: 35,
+    fresh_share_pct: 35,
+    nova_1_2_share_pct: 75,
+    snack_share_pct: 15,
+  })
 
   // Picnic 2FA form state
   const [country, setCountry] = useState<'DE' | 'NL'>('DE')
@@ -118,6 +127,14 @@ export function SettingsPage({ onDemoModeChange }: Props) {
   const [llmModel, setLlmModel] = useState('deepseek-flash')
   const [llmApiKey, setLlmApiKey] = useState('')
   const [llmUseResponses, setLlmUseResponses] = useState(true)
+
+  // OIDC / PocketID form state
+  const [oidcEnabled, setOidcEnabled] = useState(false)
+  const [oidcProviderName, setOidcProviderName] = useState('PocketID')
+  const [oidcIssuerUrl, setOidcIssuerUrl] = useState('')
+  const [oidcClientId, setOidcClientId] = useState('')
+  const [oidcClientSecret, setOidcClientSecret] = useState('')
+  const [oidcAllowedEmails, setOidcAllowedEmails] = useState('')
 
   // Tesserae E-Ink preview state
   const [previewSize, setPreviewSize] = useState<'sm' | 'md' | 'lg'>('md')
@@ -138,6 +155,9 @@ export function SettingsPage({ onDemoModeChange }: Props) {
       setStatus(s)
       setDemoMode(s.demo_mode)
       setSyncInterval(s.sync_interval_minutes)
+      if (s.scoring_targets) {
+        setScoringTargets(s.scoring_targets)
+      }
       onDemoModeChange?.(s.demo_mode)
       setCountry((s.picnic_country_code === 'NL' ? 'NL' : 'DE') as 'DE' | 'NL')
       setTwoFaStep(s.picnic_2fa_pending)
@@ -145,6 +165,11 @@ export function SettingsPage({ onDemoModeChange }: Props) {
       setLlmBaseUrl(s.llm_base_url || 'https://api.deepseek.com')
       setLlmModel(s.llm_model || 'deepseek-flash')
       setLlmUseResponses(s.llm_use_responses_api)
+      setOidcEnabled(s.oidc_enabled)
+      setOidcProviderName(s.oidc_provider_name || 'PocketID')
+      setOidcIssuerUrl(s.oidc_issuer_url || '')
+      setOidcClientId(s.oidc_client_id || '')
+      setOidcAllowedEmails(s.oidc_allowed_emails || '')
       if (s.picnic_2fa_pending || s.picnic_status === 'reauth_required') {
         setOpenSections((prev) => ({ ...prev, picnic: true }))
       }
@@ -166,6 +191,7 @@ export function SettingsPage({ onDemoModeChange }: Props) {
         demo_mode: demoMode,
         sync_interval_minutes: syncInterval,
         api_key: apiKeyInput.trim() || undefined,
+        scoring_targets: scoringTargets,
       })
       setApiKeyInput('')
       showMsg('ok', res.message)
@@ -292,6 +318,58 @@ export function SettingsPage({ onDemoModeChange }: Props) {
     }
   }
 
+  const handleSaveOIDC = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const wasEnabled = Boolean(status?.oidc_enabled)
+    try {
+      const res = await api.saveOIDCSettings({
+        enabled: oidcEnabled,
+        issuer_url: oidcIssuerUrl.trim(),
+        client_id: oidcClientId.trim(),
+        client_secret: oidcClientSecret.trim() || undefined,
+        allowed_emails: oidcAllowedEmails.trim(),
+        provider_name: oidcProviderName.trim() || 'PocketID',
+      })
+      setOidcClientSecret('')
+      if (!wasEnabled && oidcEnabled) {
+        showMsg('ok', `${res.message} Weiterleitung zur Anmeldung…`)
+        window.location.assign('/api/auth/oidc/login')
+        return
+      }
+      showMsg('ok', res.message)
+      await load()
+    } catch (err) {
+      showMsg('err', err instanceof Error ? err.message : 'OIDC-Speichern fehlgeschlagen')
+    }
+  }
+
+  const handleClearOidcSecret = async () => {
+    try {
+      const res = await api.saveOIDCSettings({
+        enabled: oidcEnabled,
+        issuer_url: oidcIssuerUrl.trim(),
+        client_id: oidcClientId.trim(),
+        clear_client_secret: true,
+        allowed_emails: oidcAllowedEmails.trim(),
+        provider_name: oidcProviderName.trim() || 'PocketID',
+      })
+      setOidcClientSecret('')
+      showMsg('ok', res.message)
+      await load()
+    } catch (err) {
+      showMsg('err', err instanceof Error ? err.message : 'Entfernen fehlgeschlagen')
+    }
+  }
+
+  const handleTestOIDC = async () => {
+    try {
+      const res = await api.testOIDC()
+      showMsg('ok', `OIDC Discovery OK (${res.issuer ?? oidcIssuerUrl})`)
+    } catch (err) {
+      showMsg('err', err instanceof Error ? err.message : 'OIDC-Test fehlgeschlagen')
+    }
+  }
+
   const handleManualSync = async () => {
     setSyncing(true)
     try {
@@ -308,6 +386,7 @@ export function SettingsPage({ onDemoModeChange }: Props) {
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
   const summaryUrl = `${origin}/api/v1/summary`
   const einkUrl = `${origin}/widget/eink?size=${previewSize}&theme=${previewTheme}`
+  const oidcCallbackUrl = `${origin}/api/auth/oidc/callback`
 
   const copyText = (text: string, label = 'URL') => {
     void navigator.clipboard?.writeText(text)
@@ -575,8 +654,93 @@ export function SettingsPage({ onDemoModeChange }: Props) {
             </div>
           </div>
 
+          {/* Persönliche Scoring-Ziele */}
+          <div className="md:col-span-3 pt-3 border-t border-[#ECEBE6] space-y-2.5">
+            <div className="text-xs font-semibold text-zinc-700">
+              Persönliche Scoring-Ziele (für Score & 4 Ziel-Häkchen)
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <label className="space-y-1 text-xs text-zinc-600">
+                <span>Protein (g / 1.000 kcal)</span>
+                <input
+                  type="number"
+                  min={15}
+                  max={80}
+                  step={1}
+                  value={scoringTargets.protein_per_1000_kcal}
+                  onChange={(e) =>
+                    setScoringTargets((prev) => ({
+                      ...prev,
+                      protein_per_1000_kcal: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] tabular-nums"
+                />
+              </label>
+              <label className="space-y-1 text-xs text-zinc-600">
+                <span>Frisch & Gemüse (%)</span>
+                <input
+                  type="number"
+                  min={10}
+                  max={70}
+                  step={1}
+                  value={scoringTargets.fresh_share_pct}
+                  onChange={(e) =>
+                    setScoringTargets((prev) => ({
+                      ...prev,
+                      fresh_share_pct: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] tabular-nums"
+                />
+              </label>
+              <label className="space-y-1 text-xs text-zinc-600">
+                <span>NOVA 1–2 (%)</span>
+                <input
+                  type="number"
+                  min={40}
+                  max={95}
+                  step={1}
+                  value={scoringTargets.nova_1_2_share_pct}
+                  onChange={(e) =>
+                    setScoringTargets((prev) => ({
+                      ...prev,
+                      nova_1_2_share_pct: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] tabular-nums"
+                />
+              </label>
+              <label className="space-y-1 text-xs text-zinc-600">
+                <span>Max. Snacks (%)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={scoringTargets.snack_share_pct}
+                  onChange={(e) =>
+                    setScoringTargets((prev) => ({
+                      ...prev,
+                      snack_share_pct: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] tabular-nums"
+                />
+              </label>
+            </div>
+          </div>
+
           <div className="md:col-span-3 flex flex-wrap items-center justify-between gap-2 pt-1">
-            <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="/api/v1/settings/backup"
+                download
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] hover:bg-zinc-100 text-xs font-medium text-zinc-700"
+              >
+                <Download className="w-3.5 h-3.5" />
+                DB-Backup (.db)
+              </a>
               {!status.demo_mode && (
                 <button
                   type="button"
@@ -609,7 +773,143 @@ export function SettingsPage({ onDemoModeChange }: Props) {
         </form>
       </CollapsibleCard>
 
-      {/* 3) DeepSeek / LLM Config */}
+      {/* 3) Zugriffsschutz (OIDC / PocketID) */}
+      <CollapsibleCard
+        icon={<ShieldCheck className="w-4 h-4" />}
+        title="Zugriffsschutz (OIDC / PocketID)"
+        subtitle="Haushalts-Login per Passkey/SSO · E-Ink & Home Assistant bleiben per API-Key erreichbar"
+        badge={status.oidc_enabled ? `Aktiv (${status.oidc_provider_name})` : 'Optional'}
+        badgeTone={status.oidc_enabled ? 'sage' : 'neutral'}
+        open={openSections.oidc}
+        onToggle={() => toggleSection('oidc')}
+      >
+        <form onSubmit={handleSaveOIDC} className="pt-3 space-y-3 max-w-2xl">
+          <div className="p-3 rounded-xl bg-[#FAF9F6] border border-[#E5E4DF] space-y-1.5">
+            <div className="text-[11px] font-medium text-zinc-500">
+              Redirect / Callback URL (in PocketID als Callback URL hinterlegen)
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <code className="text-xs font-mono text-zinc-700 truncate">{oidcCallbackUrl}</code>
+              <button
+                type="button"
+                onClick={() => copyText(oidcCallbackUrl, 'Callback URL')}
+                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-[#E5E4DF] text-xs text-zinc-700 hover:bg-zinc-50 cursor-pointer"
+              >
+                <Copy className="w-3 h-3" />
+                Kopieren
+              </button>
+            </div>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#FAF9F6] border border-[#E5E4DF] flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-medium text-[#18181B]">OIDC-Anmeldung erzwingen</div>
+              <p className="text-[11px] text-zinc-500">
+                Schützt alle Web-UI-Ansichten (30-Tage-Cookie). Vor Aktivierung prüft das Backend
+                automatisch die Discovery-URL.
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={oidcEnabled}
+              onChange={(e) => setOidcEnabled(e.target.checked)}
+              className="w-4 h-4 accent-[#2E7D5B] cursor-pointer shrink-0"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <label className="space-y-1 text-xs text-zinc-600">
+              <span>Anzeigename (Login-Button)</span>
+              <input
+                type="text"
+                value={oidcProviderName}
+                onChange={(e) => setOidcProviderName(e.target.value)}
+                placeholder="PocketID"
+                className="w-full px-3 py-2 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6]"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-zinc-600">
+              <span>Issuer URL</span>
+              <input
+                type="url"
+                value={oidcIssuerUrl}
+                onChange={(e) => setOidcIssuerUrl(e.target.value)}
+                placeholder="https://id.deinedomain.de"
+                className="w-full px-3 py-2 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6]"
+              />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <label className="space-y-1 text-xs text-zinc-600">
+              <span>Client ID</span>
+              <input
+                type="text"
+                value={oidcClientId}
+                onChange={(e) => setOidcClientId(e.target.value)}
+                placeholder="Aus PocketID kopieren"
+                className="w-full px-3 py-2 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] font-mono"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-zinc-600">
+              <span>Client Secret (optional bei PKCE Public Client)</span>
+              <input
+                type="password"
+                value={oidcClientSecret}
+                onChange={(e) => setOidcClientSecret(e.target.value)}
+                placeholder={
+                  status.oidc_has_secret
+                    ? 'Gespeichert (leer lassen zum Behalten)'
+                    : 'Leer lassen bei Public Client'
+                }
+                className="w-full px-3 py-2 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6]"
+              />
+            </label>
+          </div>
+
+          <label className="block space-y-1 text-xs text-zinc-600">
+            <span>Erlaubte E-Mail-Adressen (optional, kommagetrennt)</span>
+            <input
+              type="text"
+              value={oidcAllowedEmails}
+              onChange={(e) => setOidcAllowedEmails(e.target.value)}
+              placeholder="du@example.de, partner@example.de (leer = alle im PocketID-Client)"
+              className="w-full px-3 py-2 text-sm rounded-xl border border-[#E5E4DF] bg-[#FAF9F6]"
+            />
+          </label>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div>
+              {status.oidc_has_secret && (
+                <button
+                  type="button"
+                  onClick={handleClearOidcSecret}
+                  className="px-3 py-2 rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] hover:bg-zinc-100 text-xs font-medium text-zinc-600 cursor-pointer"
+                >
+                  Client Secret entfernen
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleTestOIDC}
+                className="px-4 py-2 rounded-xl border border-[#E5E4DF] bg-[#FAF9F6] hover:bg-zinc-100 text-sm font-medium text-zinc-700 cursor-pointer"
+              >
+                Discovery testen
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl bg-[#18181B] hover:bg-zinc-800 text-white text-sm font-medium cursor-pointer"
+              >
+                Speichern
+              </button>
+            </div>
+          </div>
+        </form>
+      </CollapsibleCard>
+
+      {/* 4) DeepSeek / LLM Config */}
       <CollapsibleCard
         icon={<Sparkles className="w-4 h-4" />}
         title="LLM Anreicherung (DeepSeek Flash)"

@@ -15,7 +15,7 @@ def test_healthcheck(client: TestClient) -> None:
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["demo_mode"] is True
-    assert payload["version"] == "0.1.0"
+    assert payload["version"] == "0.2.0"
 
 
 def test_demo_dashboard_deliveries_and_mealie(client: TestClient) -> None:
@@ -217,5 +217,49 @@ def test_product_image_quick_wins_and_enrich_endpoint(client: TestClient) -> Non
     enrich = client.post("/api/v1/products/enrich")
     assert enrich.status_code == 200
     assert enrich.json()["status"] == "ok"
+
+
+def test_v02_search_remove_wins_targets_backup_and_eink_streak(client: TestClient) -> None:
+    # Live/demo Picnic search endpoint
+    search = client.get("/api/v1/picnic/search?q=skyr")
+    assert search.status_code == 200
+    hits = search.json()
+    assert len(hits) >= 1
+    assert hits[0]["picnic_id"] == "p_skyr"
+
+    # Detractor remove quick-wins present in demo cart
+    cart = client.get("/api/v1/cart").json()
+    assert len(cart["remove_wins"]) >= 1
+    assert cart["remove_wins"][0]["score_delta"] > 0
+
+    # Configurable scoring targets persisted & returned
+    upd = client.put(
+        "/api/v1/settings/app",
+        json={
+            "scoring_targets": {
+                "protein_per_1000_kcal": 40,
+                "fresh_share_pct": 38,
+                "nova_1_2_share_pct": 80,
+                "snack_share_pct": 12,
+            }
+        },
+    )
+    assert upd.status_code == 200
+    settings_out = client.get("/api/v1/settings").json()
+    assert settings_out["scoring_targets"]["protein_per_1000_kcal"] == 40.0
+
+    # 1-click SQLite online backup download
+    backup = client.get("/api/v1/settings/backup")
+    assert backup.status_code == 200
+    assert backup.content.startswith(b"SQLite format 3\x00")
+    assert "attachment" in backup.headers.get("content-disposition", "")
+
+    # Tesserae summary + E-Ink SERIE badge & lg delivery slot
+    summary = client.get("/api/v1/summary").json()
+    assert summary["healthy_streak_weeks"] >= 2
+    widget_lg = client.get("/widget/eink?size=lg&theme=mono")
+    assert widget_lg.status_code == 200
+    assert "SERIE" in widget_lg.text
+
 
 

@@ -2,6 +2,7 @@ import {
   ArrowRight,
   KeyRound,
   PlayCircle,
+  Plus,
   RefreshCw,
   ShoppingBag,
   Sparkles,
@@ -26,6 +27,8 @@ export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange 
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [startingDemo, setStartingDemo] = useState(false)
+  const [boosting, setBoosting] = useState(false)
+  const [boostToast, setBoostToast] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const load = async () => {
@@ -55,6 +58,25 @@ export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange 
       setError(err instanceof Error ? err.message : 'Sync fehlgeschlagen')
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const handleQuickBoost = async (picnicId: string, name: string) => {
+    setBoosting(true)
+    try {
+      const prev = data?.live_cart_score
+      const updated = await api.addToCart(picnicId, 1)
+      await load()
+      const msg =
+        prev != null && prev !== updated.metrics.score
+          ? `${name} (+1) · Warenkorb ${prev} → ${updated.metrics.score}`
+          : `${name} (+1) in den Warenkorb gelegt`
+      setBoostToast(msg)
+      setTimeout(() => setBoostToast(null), 2800)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Hinzufügen fehlgeschlagen')
+    } finally {
+      setBoosting(false)
     }
   }
 
@@ -139,6 +161,12 @@ export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange 
 
   return (
     <div className="space-y-5">
+      {boostToast && (
+        <div className="fixed bottom-20 md:bottom-6 right-4 z-50 bg-[#18181B] text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-lg tabular-nums">
+          {boostToast}
+        </div>
+      )}
+
       {/* Subtle Re-Auth Banner when Picnic session expired */}
       {data.picnic_status === 'reauth_required' && (
         <div className="bg-[#D97706]/10 border border-[#D97706]/30 rounded-2xl p-4 flex items-center justify-between gap-3">
@@ -172,9 +200,9 @@ export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange 
         </div>
       )}
 
-      {/* Hero Row: Weekly Score + Live Cart Pre-Checkout shortcut */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <section className="lg:col-span-2 bg-white border border-[#E5E4DF] rounded-2xl p-5 sm:p-6">
+      {/* Hero Row: Weekly Score + Live Cart Pre-Checkout shortcut (md+ for Foldables & Desktop) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <section className="md:col-span-2 bg-white border border-[#E5E4DF] rounded-2xl p-5 sm:p-6">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="flex items-center flex-wrap gap-2">
@@ -256,10 +284,37 @@ export function DashboardPage({ onNavigate, onCartCountChange, onDemoModeChange 
                 <div className="mt-2 text-sm text-zinc-600 tabular-nums">
                   {data.live_cart_item_count} Artikel · {formatEuro(data.live_cart_total_cents)}
                 </div>
-                <p className="mt-3 text-xs text-zinc-500 leading-relaxed">
-                  Prüfe deinen offenen Picnic-Warenkorb vor dem Bestellen, nutze Quick-Wins und
-                  ergänze gesunde Favoriten mit einem Klick.
-                </p>
+
+                {data.top_cart_quick_win ? (
+                  <div className="mt-3.5 p-3 rounded-xl bg-[#2E7D5B]/[0.06] border border-[#2E7D5B]/20 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-semibold text-[#2E7D5B]">
+                        1-Tap Boost (+{data.top_cart_quick_win.score_delta} Pkt.)
+                      </div>
+                      <div className="text-xs font-medium text-[#18181B] truncate">
+                        {data.top_cart_quick_win.name}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={boosting}
+                      onClick={() =>
+                        handleQuickBoost(
+                          data.top_cart_quick_win!.picnic_id,
+                          data.top_cart_quick_win!.name,
+                        )
+                      }
+                      className="shrink-0 inline-flex items-center gap-0.5 px-2.5 py-1.5 rounded-lg bg-[#2E7D5B] hover:bg-[#25664a] text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                    >
+                      <Plus className="w-3.5 h-3.5" />1
+                    </button>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs text-zinc-500 leading-relaxed">
+                    Prüfe deinen offenen Picnic-Warenkorb vor dem Bestellen und ergänze gesunde
+                    Favoriten mit einem Klick.
+                  </p>
+                )}
               </>
             ) : (
               <p className="mt-4 text-sm text-zinc-500">Aktuell kein offener Picnic-Warenkorb.</p>

@@ -21,7 +21,12 @@ from app.schemas import (
     TesseraeTrendPoint,
 )
 from app.services.picnic_service import get_picnic_status, product_to_scorable
-from app.services.scoring import compute_rolling_average_and_delta, score_basket
+from app.services.scoring import (
+    compute_healthy_streak,
+    compute_rolling_average_and_delta,
+    score_basket,
+)
+from app.services.settings_store import get_effective_scoring_targets
 
 router = APIRouter(tags=["tesserae"])
 
@@ -50,15 +55,20 @@ def verify_optional_api_key(
 
 
 def _collect_summary(db: Session) -> TesseraeSummaryResponse:
+    from app.schemas import ScoringTargets
+
     now = datetime.now(UTC)
+    targets = ScoringTargets(**get_effective_scoring_targets(db))
     trend, week_metrics = build_weekly_trend(db)
     hist_scores = [pt.score for pt in trend]
+    baseline_scores = hist_scores[:-1] if len(hist_scores) >= 2 else hist_scores
+    streak = compute_healthy_streak(hist_scores, threshold=75)
 
     current_week_obj: TesseraeCurrentWeek | None = None
     if trend:
         latest_wk = trend[-1].iso_week
         wm = week_metrics[latest_wk]
-        _, delta = compute_rolling_average_and_delta(wm.score, hist_scores)
+        _, delta = compute_rolling_average_and_delta(wm.score, baseline_scores)
         current_week_obj = TesseraeCurrentWeek(
             iso_week=latest_wk,
             score=wm.score,
@@ -84,7 +94,7 @@ def _collect_summary(db: Session) -> TesseraeSummaryResponse:
                         int(entry.get("price_cents", 0)),
                     )
                 )
-        cart_metrics = score_basket(scorable)
+        cart_metrics = score_basket(scorable, targets=targets)
         _, cart_delta = compute_rolling_average_and_delta(cart_metrics.score, hist_scores)
         live_cart_obj = TesseraeLiveCart(
             item_count=snap.item_count,
@@ -113,14 +123,35 @@ def _collect_summary(db: Session) -> TesseraeSummaryResponse:
             health_score=rec.health_score if rec else None,
         )
 
+    picnic_status = get_picnic_status(db)
+    next_slot_iso = (
+        snap.next_slot_start.isoformat()
+        if snap is not None and snap.next_slot_start is not None
+        else None
+    )
+
     return TesseraeSummaryResponse(
         updated_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        picnic_status=get_picnic_status(db),
+        picnic_status=picnic_status,
+        picnic_reauth_required=picnic_status == "reauth_required",
+        next_delivery_slot=next_slot_iso,
+        healthy_streak_weeks=streak,
         current_week=current_week_obj,
         live_cart=live_cart_obj,
         trend_8_weeks=[TesseraeTrendPoint(iso_week=p.iso_week, score=p.score) for p in trend],
         mealie_today=mealie_today_obj,
     )
+
+
+def _format_eink_slot(iso_slot: str | None) -> str:
+    if not iso_slot:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_slot.replace("Z", "+00:00"))
+        days = ["MO", "DI", "MI", "DO", "FR", "SA", "SO"]
+        return f" · {days[dt.weekday()]} {dt.strftime('%H:%M')}"
+    except ValueError:
+        return ""
 
 
 @router.get(
@@ -192,20 +223,24 @@ def get_eink_widget(
     delta_str = f"{'+' if delta_val >= 0 else ''}{delta_val} vs. Schnitt"
     week_label = cw.iso_week if cw else "—"
 
-    status_badge = ""
+    badges: list[str] = []
+    if summary.healthy_streak_weeks >= 2:
+        badges.append(f'<span class="badge">SERIE {summary.healthy_streak_weeks}W</span>')
     if summary.picnic_status == "reauth_required":
-        status_badge = '<span class="badge">2FA ERNEUERN</span>'
+        badges.append('<span class="badge">2FA ERNEUERN</span>')
     elif summary.picnic_status == "demo":
-        status_badge = '<span class="badge">DEMO</span>'
+        badges.append('<span class="badge">DEMO</span>')
+    status_badge = " ".join(badges)
 
     cart = summary.live_cart
     cart_html = ""
     if cart is not None:
         euros = f"{cart.total_cents / 100:.2f}".replace(".", ",")
         cart_delta = f"{'+' if cart.delta_vs_avg >= 0 else ''}{cart.delta_vs_avg}"
+        slot_suffix = _format_eink_slot(cart.next_delivery_slot) if size == "lg" else ""
         cart_html = (
             f'<div class="cart-strip">'
-            f'<span class="k">WARENKORB ({cart.item_count})</span>'
+            f'<span class="k">WARENKORB ({cart.item_count}){html.escape(slot_suffix)}</span>'
             f'<span class="v">SCORE {cart.score} ({cart_delta}) · {euros} €</span>'
             f"</div>"
         )

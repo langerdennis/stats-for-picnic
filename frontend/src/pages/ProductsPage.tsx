@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Plus, Search, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { Eye, EyeOff, Plus, RefreshCw, Search, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, type BucketType, type Product } from '../api/client'
 import { BUCKET_LABELS, BucketBadge, NovaBadge } from '../components/BucketBadge'
@@ -18,12 +18,25 @@ interface Props {
   onCartCountChange?: (count: number) => void
 }
 
+interface NutritionDraft {
+  weight: string
+  kcal: string
+  protein: string
+  sugar: string
+}
+
 export function ProductsPage({ onCartCountChange }: Props) {
   const [products, setProducts] = useState<Product[]>([])
   const [search, setSearch] = useState('')
   const [bucketFilter, setBucketFilter] = useState<string>('all')
   const [ignoredFilter, setIgnoredFilter] = useState<'all' | 'only' | 'exclude' | 'pending'>('all')
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState<NutritionDraft>({
+    weight: '',
+    kcal: '',
+    protein: '',
+    sugar: '',
+  })
   const [busyId, setBusyId] = useState<string | null>(null)
   const [enriching, setEnriching] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
@@ -31,7 +44,21 @@ export function ProductsPage({ onCartCountChange }: Props) {
 
   const showToast = (msg: string) => {
     setToast(msg)
-    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 2800)
+    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 3000)
+  }
+
+  const openEditor = (p: Product) => {
+    if (editingId === p.picnic_id) {
+      setEditingId(null)
+      return
+    }
+    setEditingId(p.picnic_id)
+    setDraft({
+      weight: p.parsed_weight_g != null ? String(Math.round(p.parsed_weight_g)) : '',
+      kcal: p.kcal_per_100g != null ? String(Math.round(p.kcal_per_100g)) : '',
+      protein: p.protein_g_per_100g != null ? String(p.protein_g_per_100g) : '',
+      sugar: p.sugar_g_per_100g != null ? String(p.sugar_g_per_100g) : '',
+    })
   }
 
   const load = async () => {
@@ -42,6 +69,8 @@ export function ProductsPage({ onCartCountChange }: Props) {
         ignored: ignoredFilter,
       })
       setProducts(list)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Produkte konnten nicht geladen werden')
     } finally {
       setLoading(false)
     }
@@ -61,12 +90,58 @@ export function ProductsPage({ onCartCountChange }: Props) {
       ignored_reason?: string | null
       bucket?: BucketType
       nova_group?: number
+      parsed_weight_g?: number
+      kcal_per_100g?: number
+      protein_g_per_100g?: number
+      sugar_g_per_100g?: number
     },
+    successMsg?: string,
   ) => {
     setBusyId(picnicId)
     try {
       const updated = await api.updateProduct(picnicId, patch)
       setProducts((prev) => prev.map((p) => (p.picnic_id === picnicId ? updated : p)))
+      if (successMsg) showToast(successMsg)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Änderung fehlgeschlagen')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleSaveNutrition = async (picnicId: string) => {
+    const patch: {
+      parsed_weight_g?: number
+      kcal_per_100g?: number
+      protein_g_per_100g?: number
+      sugar_g_per_100g?: number
+    } = {}
+    const w = Number(draft.weight)
+    if (draft.weight.trim() !== '' && Number.isFinite(w) && w > 0) patch.parsed_weight_g = w
+    const kc = Number(draft.kcal)
+    if (draft.kcal.trim() !== '' && Number.isFinite(kc) && kc >= 0) patch.kcal_per_100g = kc
+    const pr = Number(draft.protein)
+    if (draft.protein.trim() !== '' && Number.isFinite(pr) && pr >= 0) patch.protein_g_per_100g = pr
+    const su = Number(draft.sugar)
+    if (draft.sugar.trim() !== '' && Number.isFinite(su) && su >= 0) patch.sugar_g_per_100g = su
+
+    await patchProduct(picnicId, patch, 'Nährwerte & Gewicht gespeichert')
+  }
+
+  const handleReEnrichSingle = async (picnicId: string, name: string) => {
+    setBusyId(picnicId)
+    try {
+      const updated = await api.reEnrichProduct(picnicId)
+      setProducts((prev) => prev.map((p) => (p.picnic_id === picnicId ? updated : p)))
+      setDraft({
+        weight: updated.parsed_weight_g != null ? String(Math.round(updated.parsed_weight_g)) : '',
+        kcal: updated.kcal_per_100g != null ? String(Math.round(updated.kcal_per_100g)) : '',
+        protein: updated.protein_g_per_100g != null ? String(updated.protein_g_per_100g) : '',
+        sugar: updated.sugar_g_per_100g != null ? String(updated.sugar_g_per_100g) : '',
+      })
+      showToast(`${name}: neu angereichert (${updated.enrichment_source})`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Neu-Anreicherung fehlgeschlagen')
     } finally {
       setBusyId(null)
     }
@@ -78,6 +153,8 @@ export function ProductsPage({ onCartCountChange }: Props) {
       const updated = await api.addToCart(picnicId, 1)
       onCartCountChange?.(updated.item_count)
       showToast(`${name} (+1) in den Warenkorb gelegt`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Konnte nicht hinzugefügt werden')
     } finally {
       setBusyId(null)
     }
@@ -91,6 +168,8 @@ export function ProductsPage({ onCartCountChange }: Props) {
         `Anreicherung fertig: ${res.openfoodfacts} OFF, ${res.llm} LLM, ${res.rule_non_food} Haushalt`,
       )
       await load()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Anreicherung fehlgeschlagen')
     } finally {
       setEnriching(false)
     }
@@ -297,54 +376,137 @@ export function ProductsPage({ onCartCountChange }: Props) {
 
                     <button
                       type="button"
-                      onClick={() => setEditingId(isEditing ? null : p.picnic_id)}
+                      onClick={() => openEditor(p)}
                       className={`p-1.5 rounded-xl border transition cursor-pointer ${
                         isEditing
                           ? 'bg-[#18181B] text-white border-[#18181B]'
                           : 'border-[#E5E4DF] bg-[#FAF9F6] text-zinc-600 hover:bg-zinc-100'
                       }`}
-                      title="Bucket / NOVA anpassen"
+                      title="Bucket, NOVA & Nährwerte anpassen"
                     >
                       <SlidersHorizontal className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
 
-                {/* Inline Bucket & NOVA Override Controls */}
+                {/* Inline Bucket, NOVA, Weight & Macro Override Controls */}
                 {isEditing && (
-                  <div className="pt-2.5 border-t border-[#ECEBE6] flex flex-wrap items-center gap-3 text-xs">
-                    <label className="flex items-center gap-2 text-zinc-600">
-                      Bucket:
-                      <select
-                        value={p.bucket}
-                        onChange={(e) =>
-                          patchProduct(p.picnic_id, { bucket: e.target.value as BucketType })
-                        }
-                        className="px-2.5 py-1 rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B]"
-                      >
-                        {BUCKET_OPTIONS.map((b) => (
-                          <option key={b} value={b}>
-                            {BUCKET_LABELS[b]}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                  <div className="pt-3 border-t border-[#ECEBE6] space-y-3 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <label className="flex items-center gap-2 text-zinc-600">
+                          Bucket:
+                          <select
+                            value={p.bucket}
+                            onChange={(e) =>
+                              patchProduct(p.picnic_id, { bucket: e.target.value as BucketType })
+                            }
+                            className="px-2.5 py-1.5 rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B]"
+                          >
+                            {BUCKET_OPTIONS.map((b) => (
+                              <option key={b} value={b}>
+                                {BUCKET_LABELS[b]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
 
-                    <label className="flex items-center gap-2 text-zinc-600">
-                      NOVA:
-                      <select
-                        value={p.nova_group ?? 2}
-                        onChange={(e) =>
-                          patchProduct(p.picnic_id, { nova_group: Number(e.target.value) })
-                        }
-                        className="px-2.5 py-1 rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B]"
+                        <label className="flex items-center gap-2 text-zinc-600">
+                          NOVA:
+                          <select
+                            value={p.nova_group ?? 2}
+                            onChange={(e) =>
+                              patchProduct(p.picnic_id, { nova_group: Number(e.target.value) })
+                            }
+                            className="px-2.5 py-1.5 rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B]"
+                          >
+                            <option value={1}>NOVA 1 (Unverarbeitet)</option>
+                            <option value={2}>NOVA 2 (Küchenzutaten)</option>
+                            <option value={3}>NOVA 3 (Verarbeitet)</option>
+                            <option value={4}>NOVA 4 (Hochverarbeitet)</option>
+                          </select>
+                        </label>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={busyId === p.picnic_id}
+                        onClick={() => handleReEnrichSingle(p.picnic_id, p.name)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] hover:bg-zinc-100 text-zinc-700 font-medium cursor-pointer disabled:opacity-50"
                       >
-                        <option value={1}>NOVA 1 (Unverarbeitet)</option>
-                        <option value={2}>NOVA 2 (Küchenzutaten)</option>
-                        <option value={3}>NOVA 3 (Verarbeitet)</option>
-                        <option value={4}>NOVA 4 (Hochverarbeitet)</option>
-                      </select>
-                    </label>
+                        <RefreshCw
+                          className={`w-3 h-3 ${busyId === p.picnic_id ? 'animate-spin' : ''}`}
+                        />
+                        Neu anreichern
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 items-end">
+                      <label className="space-y-1 text-[11px] text-zinc-500">
+                        <span>Gewicht (g)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={50000}
+                          step={1}
+                          value={draft.weight}
+                          onChange={(e) =>
+                            setDraft((prev) => ({ ...prev, weight: e.target.value }))
+                          }
+                          placeholder="z. B. 500"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B] tabular-nums"
+                        />
+                      </label>
+                      <label className="space-y-1 text-[11px] text-zinc-500">
+                        <span>kcal / 100g</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={1000}
+                          step={1}
+                          value={draft.kcal}
+                          onChange={(e) => setDraft((prev) => ({ ...prev, kcal: e.target.value }))}
+                          placeholder="0"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B] tabular-nums"
+                        />
+                      </label>
+                      <label className="space-y-1 text-[11px] text-zinc-500">
+                        <span>Protein g / 100g</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={0.1}
+                          value={draft.protein}
+                          onChange={(e) =>
+                            setDraft((prev) => ({ ...prev, protein: e.target.value }))
+                          }
+                          placeholder="0"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B] tabular-nums"
+                        />
+                      </label>
+                      <label className="space-y-1 text-[11px] text-zinc-500">
+                        <span>Zucker g / 100g</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={0.1}
+                          value={draft.sugar}
+                          onChange={(e) => setDraft((prev) => ({ ...prev, sugar: e.target.value }))}
+                          placeholder="0"
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-[#E5E4DF] bg-[#FAF9F6] text-[#18181B] tabular-nums"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={busyId === p.picnic_id}
+                        onClick={() => handleSaveNutrition(p.picnic_id)}
+                        className="col-span-2 sm:col-span-1 px-3 py-1.5 rounded-lg bg-[#18181B] hover:bg-zinc-800 text-white text-xs font-medium cursor-pointer disabled:opacity-50"
+                      >
+                        Werte speichern
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 from collections import defaultdict
 from datetime import UTC, datetime
 
@@ -29,8 +31,11 @@ from app.schemas import (
     DeliveryOut,
     MealiePlanEntryOut,
     MealieRecipeOut,
+    PicnicSearchItemOut,
     ProductOut,
     ProductUpdateRequest,
+    RestockSuggestion,
+    ScoringTargets,
     WeekTrendPoint,
 )
 from app.services.enrichment import enrich_pending_products
@@ -44,18 +49,25 @@ from app.services.picnic_service import (
     product_to_scorable,
     recompute_delivery_scores,
     recompute_latest_cart_score,
+    refresh_live_cart,
+    search_picnic_products,
 )
 from app.services.scoring import (
     ScorableItem,
     compute_cart_quick_wins,
+    compute_cart_remove_wins,
     compute_healthy_streak,
     compute_rolling_average_and_delta,
     iso_week_str,
     score_basket,
 )
-from app.services.settings_store import is_demo_mode
+from app.services.settings_store import get_effective_scoring_targets, is_demo_mode
 
 router = APIRouter(prefix="/api/v1", tags=["picnic"])
+
+
+def _get_targets(db: Session) -> ScoringTargets:
+    return ScoringTargets(**get_effective_scoring_targets(db))
 
 
 def _product_image_url(picnic_id: str) -> str:
@@ -96,6 +108,7 @@ def _build_mealie_entry_out(plan: MealieMealplan, recipe: MealieRecipe | None) -
 
 def build_weekly_trend(db: Session) -> tuple[list[WeekTrendPoint], dict[str, BasketScoreResult]]:
     """Aggregate deliveries per ISO week and compute BasketScoreResult per week."""
+    targets = _get_targets(db)
     deliveries = list(
         db.scalars(select(Delivery).order_by(Delivery.delivery_time.asc(), Delivery.iso_week.asc()))
     )
@@ -114,7 +127,7 @@ def build_weekly_trend(db: Session) -> tuple[list[WeekTrendPoint], dict[str, Bas
     trend: list[WeekTrendPoint] = []
     week_metrics: dict[str, BasketScoreResult] = {}
     for wk in week_order:
-        metrics = score_basket(grouped[wk])
+        metrics = score_basket(grouped[wk], targets=targets)
         week_metrics[wk] = metrics
         trend.append(
             WeekTrendPoint(
@@ -129,13 +142,82 @@ def build_weekly_trend(db: Session) -> tuple[list[WeekTrendPoint], dict[str, Bas
     return trend[-8:], week_metrics
 
 
+def _compute_restock_suggestions(
+    db: Session,
+    cart_product_ids: set[str],
+    *,
+    recent_limit: int = 6,
+    min_ratio: float = 0.5,
+    max_results: int = 6,
+) -> list[RestockSuggestion]:
+    """Identify recurring staples purchased in >=50% of recent deliveries that are missing from the cart."""
+    recent_deliveries = list(
+        db.scalars(
+            select(Delivery)
+            .order_by(desc(Delivery.delivery_time), desc(Delivery.iso_week))
+            .limit(recent_limit)
+        )
+    )
+    checked = len(recent_deliveries)
+    if checked < 2:
+        return []
+
+    min_hits = max(2, math.ceil(checked * min_ratio))
+    hits_by_pid: dict[str, int] = defaultdict(int)
+    for delivery in recent_deliveries:
+        seen_in_delivery: set[str] = set()
+        for line in delivery.items:
+            if line.picnic_id not in seen_in_delivery:
+                seen_in_delivery.add(line.picnic_id)
+                hits_by_pid[line.picnic_id] += 1
+
+    bucket_rank = {
+        "produce": 0,
+        "protein": 1,
+        "whole_food": 2,
+        "staple": 3,
+        "beverage": 4,
+        "treat_snack": 5,
+    }
+    candidates: list[tuple[int, int, str, RestockSuggestion]] = []
+    for pid, hits in hits_by_pid.items():
+        if hits < min_hits or pid in cart_product_ids:
+            continue
+        prod = db.get(Product, pid)
+        if prod is None or not prod.is_food or prod.ignored or prod.bucket == "treat_snack":
+            continue
+        candidates.append(
+            (
+                -hits,
+                bucket_rank.get(prod.bucket, 9),
+                prod.name.lower(),
+                RestockSuggestion(
+                    picnic_id=prod.picnic_id,
+                    name=prod.name,
+                    unit_quantity=prod.unit_quantity,
+                    bucket=prod.bucket,
+                    image_url=_product_image_url(prod.picnic_id),
+                    hits_in_recent_deliveries=hits,
+                    recent_deliveries_checked=checked,
+                ),
+            )
+        )
+
+    candidates.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [row[3] for row in candidates[:max_results]]
+
+
 def _build_cart_out(db: Session) -> CartOut:
+    targets = _get_targets(db)
     snap = db.scalar(select(CartSnapshot).order_by(desc(CartSnapshot.id)).limit(1))
     trend, _ = build_weekly_trend(db)
     hist_scores = [pt.score for pt in trend]
 
     if snap is None:
-        return CartOut(avg_8_weeks=compute_rolling_average_and_delta(None, hist_scores)[0])
+        return CartOut(
+            avg_8_weeks=compute_rolling_average_and_delta(None, hist_scores)[0],
+            restock_suggestions=_compute_restock_suggestions(db, set()),
+        )
 
     raw_items = json.loads(snap.items_json or "[]")
     items_out: list[CartItemOut] = []
@@ -176,12 +258,11 @@ def _build_cart_out(db: Session) -> CartOut:
                 )
             )
 
-    metrics = score_basket(scorable)
+    metrics = score_basket(scorable, targets=targets)
     avg_8, delta = compute_rolling_average_and_delta(metrics.score, hist_scores)
     best_8 = max(hist_scores) if hist_scores else None
     is_pb = bool(best_8 is not None and snap.item_count > 0 and metrics.score >= best_8)
 
-    # Deterministic Quick-Win suggestions from past healthy staples
     candidate_prods = list(
         db.scalars(
             select(Product)
@@ -195,7 +276,10 @@ def _build_cart_out(db: Session) -> CartOut:
         )
     )
     candidate_scorable = [product_to_scorable(p, quantity=1, price_cents=250) for p in candidate_prods]
-    quick_wins = compute_cart_quick_wins(scorable, candidate_scorable, max_results=3)
+    quick_wins = compute_cart_quick_wins(scorable, candidate_scorable, max_results=3, targets=targets)
+    remove_wins = compute_cart_remove_wins(scorable, max_results=2, targets=targets)
+    cart_ids = {item.picnic_id for item in items_out}
+    restock = _compute_restock_suggestions(db, cart_ids)
 
     return CartOut(
         fetched_at=snap.fetched_at,
@@ -208,6 +292,8 @@ def _build_cart_out(db: Session) -> CartOut:
         avg_8_weeks=avg_8,
         is_personal_best=is_pb,
         quick_wins=quick_wins,
+        remove_wins=remove_wins,
+        restock_suggestions=restock,
     )
 
 
@@ -225,9 +311,11 @@ def get_dashboard(db: Session = Depends(get_db)) -> DashboardResponse:
 
     current_metrics = week_metrics.get(active_week)
     hist_scores = [pt.score for pt in trend]
+    # Compare current week against prior weeks (excluding itself when >= 2 weeks exist)
+    baseline_scores = hist_scores[:-1] if len(hist_scores) >= 2 else hist_scores
     avg_8, delta = compute_rolling_average_and_delta(
         current_metrics.score if current_metrics else None,
-        hist_scores,
+        baseline_scores,
     )
     best_8 = max(hist_scores) if hist_scores else None
     streak = compute_healthy_streak(hist_scores, threshold=75)
@@ -278,6 +366,7 @@ def get_dashboard(db: Session = Depends(get_db)) -> DashboardResponse:
         live_cart_score=cart.metrics.score if cart.item_count > 0 else None,
         live_cart_item_count=cart.item_count,
         live_cart_total_cents=cart.total_price_cents,
+        top_cart_quick_win=cart.quick_wins[0] if cart.quick_wins else None,
         weekly_mealie_entries=mealie_entries,
         last_sync_at=last_run.finished_at if last_run else None,
     )
@@ -285,6 +374,7 @@ def get_dashboard(db: Session = Depends(get_db)) -> DashboardResponse:
 
 @router.get("/deliveries", response_model=list[DeliveryOut])
 def list_deliveries(db: Session = Depends(get_db)) -> list[DeliveryOut]:
+    targets = _get_targets(db)
     deliveries = list(
         db.scalars(select(Delivery).order_by(desc(Delivery.delivery_time), desc(Delivery.iso_week)))
     )
@@ -313,7 +403,7 @@ def list_deliveries(db: Session = Depends(get_db)) -> list[DeliveryOut]:
                     image_url=_product_image_url(line.picnic_id),
                 )
             )
-        metrics = score_basket(scorable)
+        metrics = score_basket(scorable, targets=targets)
         out.append(
             DeliveryOut(
                 delivery_id=d.delivery_id,
@@ -334,15 +424,41 @@ def list_deliveries(db: Session = Depends(get_db)) -> list[DeliveryOut]:
     return out
 
 
+@router.get("/picnic/search", response_model=list[PicnicSearchItemOut])
+async def search_picnic(
+    q: str = Query(min_length=2, max_length=100),
+    db: Session = Depends(get_db),
+) -> list[PicnicSearchItemOut]:
+    try:
+        return await asyncio.to_thread(search_picnic_products, db, q)
+    except PicnicReauthRequiredError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except PicnicServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/cart", response_model=CartOut)
 def get_cart(db: Session = Depends(get_db)) -> CartOut:
     return _build_cart_out(db)
 
 
-@router.post("/cart/add", response_model=CartOut)
-def add_to_cart(body: CartModifyRequest, db: Session = Depends(get_db)) -> CartOut:
+@router.post("/cart/refresh", response_model=CartOut)
+async def refresh_cart(db: Session = Depends(get_db)) -> CartOut:
     try:
-        modify_cart_product(db, product_id=body.product_id, count=body.count, action="add")
+        await asyncio.to_thread(refresh_live_cart, db)
+    except PicnicReauthRequiredError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except PicnicServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _build_cart_out(db)
+
+
+@router.post("/cart/add", response_model=CartOut)
+async def add_to_cart(body: CartModifyRequest, db: Session = Depends(get_db)) -> CartOut:
+    try:
+        await asyncio.to_thread(
+            modify_cart_product, db, product_id=body.product_id, count=body.count, action="add"
+        )
     except PicnicReauthRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except PicnicServiceError as exc:
@@ -351,9 +467,11 @@ def add_to_cart(body: CartModifyRequest, db: Session = Depends(get_db)) -> CartO
 
 
 @router.post("/cart/remove", response_model=CartOut)
-def remove_from_cart(body: CartModifyRequest, db: Session = Depends(get_db)) -> CartOut:
+async def remove_from_cart(body: CartModifyRequest, db: Session = Depends(get_db)) -> CartOut:
     try:
-        modify_cart_product(db, product_id=body.product_id, count=body.count, action="remove")
+        await asyncio.to_thread(
+            modify_cart_product, db, product_id=body.product_id, count=body.count, action="remove"
+        )
     except PicnicReauthRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except PicnicServiceError as exc:
@@ -466,4 +584,24 @@ def update_product(
     recompute_delivery_scores(db)
     recompute_latest_cart_score(db)
 
+    return _product_to_out(product)
+
+
+@router.post("/products/{picnic_id}/re-enrich", response_model=ProductOut)
+async def re_enrich_product(
+    picnic_id: str,
+    db: Session = Depends(get_db),
+) -> ProductOut:
+    """Reset a single product back to pending and run OpenFoodFacts / LLM enrichment immediately."""
+    product = db.get(Product, picnic_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Produkt nicht gefunden.")
+
+    product.manual_override = False
+    product.enrichment_source = "pending"
+    product.enriched_at = None
+    db.commit()
+
+    await enrich_pending_products(db, limit=1, picnic_ids=[picnic_id])
+    db.refresh(product)
     return _product_to_out(product)

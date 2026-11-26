@@ -9,39 +9,45 @@ interface RatioItem {
 }
 
 export function RatioBars({ metrics }: { metrics: BasketScoreResult }) {
+  const goalMap = new Map(metrics.tier?.goals?.map((g) => [g.key, g]) ?? [])
+  const proteinGoal = goalMap.get('protein')
+  const freshGoal = goalMap.get('fresh')
+  const novaGoal = goalMap.get('nova')
+  const snackGoal = goalMap.get('snacks')
+
   const items: RatioItem[] = [
     {
       label: 'Proteindichte',
       value: `${metrics.protein_per_1000_kcal.toFixed(1)} g / 1.000 kcal`,
-      target: 'Ziel ≥ 38 g',
+      target: proteinGoal ? `Ziel ${proteinGoal.detail}` : 'Ziel ≥ 35 g',
       pct: Math.min(100, Math.max(4, metrics.sub_scores.protein_score)),
-      tone: metrics.protein_per_1000_kcal >= 35 ? 'sage' : 'neutral',
+      tone: (proteinGoal ? proteinGoal.met : metrics.protein_per_1000_kcal >= 35) ? 'sage' : 'neutral',
     },
     {
       label: 'Frisch & Gemüse',
       value: `${metrics.fresh_share_pct.toFixed(0)} %`,
-      target: 'Ziel ≥ 38 %',
+      target: freshGoal ? `Ziel ${freshGoal.detail}` : 'Ziel ≥ 35 %',
       pct: Math.min(100, Math.max(4, metrics.sub_scores.fresh_score)),
-      tone: metrics.fresh_share_pct >= 35 ? 'sage' : 'neutral',
+      tone: (freshGoal ? freshGoal.met : metrics.fresh_share_pct >= 35) ? 'sage' : 'neutral',
     },
     {
       label: 'Unverarbeitet (NOVA 1–2)',
       value: `${metrics.nova_1_2_share_pct.toFixed(0)} %`,
-      target: 'Ziel ≥ 75 %',
+      target: novaGoal ? `Ziel ${novaGoal.detail}` : 'Ziel ≥ 75 %',
       pct: Math.min(100, Math.max(4, metrics.sub_scores.nova_score)),
-      tone: metrics.nova_1_2_share_pct >= 72 ? 'sage' : 'neutral',
+      tone: (novaGoal ? novaGoal.met : metrics.nova_1_2_share_pct >= 75) ? 'sage' : 'neutral',
     },
     {
       label: 'Snacks & Zucker',
       value: `${metrics.snack_share_pct.toFixed(0)} %`,
-      target: 'Ziel ≤ 15 %',
+      target: snackGoal ? `Ziel ${snackGoal.detail}` : 'Ziel ≤ 15 %',
       pct: Math.min(100, Math.max(4, metrics.snack_share_pct * 2.2)),
-      tone: metrics.snack_share_pct <= 15 ? 'sage' : 'amber',
+      tone: (snackGoal ? snackGoal.met : metrics.snack_share_pct <= 15) ? 'sage' : 'amber',
     },
   ]
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {items.map((item) => {
         const barColor =
           item.tone === 'sage'
@@ -49,8 +55,7 @@ export function RatioBars({ metrics }: { metrics: BasketScoreResult }) {
             : item.tone === 'amber'
               ? 'bg-[#D97706]'
               : 'bg-zinc-500'
-        const valColor =
-          item.tone === 'amber' ? 'text-[#B45309]' : 'text-[#18181B]'
+        const valColor = item.tone === 'amber' ? 'text-[#B45309]' : 'text-[#18181B]'
         return (
           <div
             key={item.label}
@@ -58,7 +63,7 @@ export function RatioBars({ metrics }: { metrics: BasketScoreResult }) {
           >
             <div className="flex items-baseline justify-between gap-2">
               <span className="text-xs font-medium text-zinc-600">{item.label}</span>
-              <span className="text-[11px] text-zinc-400">{item.target}</span>
+              <span className="text-[11px] text-zinc-400 truncate">{item.target}</span>
             </div>
             <div className={`mt-1 text-base font-semibold tabular-nums ${valColor}`}>
               {item.value}

@@ -23,11 +23,24 @@ KEY_DEMO_MODE = "app_demo_mode"
 KEY_API_KEY = "app_api_key"
 KEY_SYNC_INTERVAL_MINUTES = "app_sync_interval_minutes"
 
+KEY_TARGET_PROTEIN = "target_protein_per_1000_kcal"
+KEY_TARGET_FRESH = "target_fresh_share_pct"
+KEY_TARGET_NOVA = "target_nova_1_2_share_pct"
+KEY_TARGET_SNACKS = "target_snack_share_pct"
+
+KEY_OIDC_ENABLED = "oidc_enabled"
+KEY_OIDC_ISSUER_URL = "oidc_issuer_url"
+KEY_OIDC_CLIENT_ID = "oidc_client_id"
+KEY_OIDC_CLIENT_SECRET = "oidc_client_secret"
+KEY_OIDC_ALLOWED_EMAILS = "oidc_allowed_emails"
+KEY_OIDC_PROVIDER_NAME = "oidc_provider_name"
+
 SECRET_KEYS = {
     KEY_PICNIC_AUTH_TOKEN,
     KEY_MEALIE_API_TOKEN,
     KEY_LLM_API_KEY,
     KEY_API_KEY,
+    KEY_OIDC_CLIENT_SECRET,
 }
 
 
@@ -107,3 +120,51 @@ def get_effective_llm_config(db: Session, cfg: Settings | None = None) -> tuple[
     else:
         use_responses = raw_resp.lower() in ("true", "1", "yes")
     return base_url, api_key, model, use_responses
+
+
+def _parse_float_setting(db: Session, key: str, default: float) -> float:
+    raw = get_setting(db, key)
+    if raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def get_effective_scoring_targets(db: Session) -> dict[str, float]:
+    return {
+        "protein_per_1000_kcal": _parse_float_setting(db, KEY_TARGET_PROTEIN, 35.0),
+        "fresh_share_pct": _parse_float_setting(db, KEY_TARGET_FRESH, 35.0),
+        "nova_1_2_share_pct": _parse_float_setting(db, KEY_TARGET_NOVA, 75.0),
+        "snack_share_pct": _parse_float_setting(db, KEY_TARGET_SNACKS, 15.0),
+    }
+
+
+def get_effective_oidc_config(db: Session, cfg: Settings | None = None) -> dict[str, object]:
+    settings = cfg or get_settings()
+    enabled_raw = get_setting(db, KEY_OIDC_ENABLED, "false").lower()
+    issuer = get_setting(db, KEY_OIDC_ISSUER_URL, "").strip().rstrip("/")
+    client_id = get_setting(db, KEY_OIDC_CLIENT_ID, "").strip()
+    client_secret = get_setting(db, KEY_OIDC_CLIENT_SECRET, "").strip()
+    allowed_raw = get_setting(db, KEY_OIDC_ALLOWED_EMAILS, "").strip()
+    allowed_emails = [
+        e.strip().lower() for e in allowed_raw.split(",") if e.strip()
+    ]
+    provider_name = get_setting(db, KEY_OIDC_PROVIDER_NAME, "PocketID").strip() or "PocketID"
+    enabled = (
+        not settings.oidc_disable
+        and enabled_raw in ("true", "1", "yes")
+        and bool(issuer and client_id)
+    )
+    return {
+        "enabled": enabled,
+        "issuer_url": issuer,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "allowed_emails": allowed_emails,
+        "allowed_emails_raw": allowed_raw,
+        "provider_name": provider_name,
+    }
+
+

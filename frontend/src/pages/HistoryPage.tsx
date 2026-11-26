@@ -70,6 +70,8 @@ export function HistoryPage({ onCartCountChange }: Props) {
       const updated = await api.addToCart(picnicId, 1)
       onCartCountChange?.(updated.item_count)
       showToast(`${name} (+1) in den Warenkorb gelegt`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Konnte nicht hinzugefügt werden')
     } finally {
       setBusyId(null)
     }
@@ -86,6 +88,8 @@ export function HistoryPage({ onCartCountChange }: Props) {
       )
       await loadDeliveries(false)
       showToast(currentlyIgnored ? `${name} wieder einbezogen` : `${name} als Familie ignoriert`)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Änderung fehlgeschlagen')
     } finally {
       setBusyId(null)
     }
@@ -109,8 +113,18 @@ export function HistoryPage({ onCartCountChange }: Props) {
     )
   }
 
+  // Calm 8-week household context (weekly spend + average score)
+  const recentDeliveries = deliveries.slice(0, 8)
+  const uniqueWeeks = new Set(recentDeliveries.map((d) => d.iso_week)).size || 1
+  const totalRecentCents = recentDeliveries.reduce((acc, d) => acc + d.total_price_cents, 0)
+  const avgWeeklyCents = Math.round(totalRecentCents / uniqueWeeks)
+  const scoredRecent = recentDeliveries.filter((d) => d.score != null)
+  const avgRecentScore = scoredRecent.length
+    ? Math.round(scoredRecent.reduce((acc, d) => acc + (d.score ?? 0), 0) / scoredRecent.length)
+    : null
+
   return (
-    <div className="space-y-3.5">
+    <div className="space-y-4">
       {toast && (
         <div className="fixed bottom-20 md:bottom-6 right-4 z-50 bg-[#18181B] text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-lg">
           {toast}
@@ -125,6 +139,30 @@ export function HistoryPage({ onCartCountChange }: Props) {
           </p>
         </div>
         <span className="text-xs text-zinc-400 tabular-nums">{deliveries.length} Lieferungen</span>
+      </div>
+
+      {/* Calm 8-Week Spend & Quality Context */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
+          <div className="text-[11px] text-zinc-400 font-medium">Ø pro Woche</div>
+          <div className="mt-1 text-base sm:text-lg font-semibold text-[#18181B] tabular-nums">
+            {formatEuro(avgWeeklyCents)}
+          </div>
+        </div>
+        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
+          <div className="text-[11px] text-zinc-400 font-medium">
+            Gesamt ({uniqueWeeks} Wo.)
+          </div>
+          <div className="mt-1 text-base sm:text-lg font-semibold text-[#18181B] tabular-nums">
+            {formatEuro(totalRecentCents)}
+          </div>
+        </div>
+        <div className="bg-white border border-[#E5E4DF] rounded-2xl p-3.5">
+          <div className="text-[11px] text-zinc-400 font-medium">Ø Wochen-Score</div>
+          <div className="mt-1 text-base sm:text-lg font-semibold text-[#2E7D5B] tabular-nums">
+            {avgRecentScore != null ? `${avgRecentScore}/100` : '—'}
+          </div>
+        </div>
       </div>
 
       {deliveries.map((d) => {
