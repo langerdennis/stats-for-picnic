@@ -1,0 +1,10 @@
+services:
+  stats-for-picnic:
+    build: .
+    image: ghcr.io/langerdennis/stats-for-picnic:latest
+    container_name: stats-for-picnic
+    restart: unless-stopped
+    ports:
+      - "8071:8080"
+    volumes:
+      - ./data:/data
