@@ -15,12 +15,15 @@ from app.schemas import (
     ProductPricePoint,
     ProductStatItem,
     ProteinValueItem,
+    ScoringTargets,
     ShoppingHabits,
     StatsResponse,
     StatsSummary,
     WeekdayCount,
 )
-from app.services.scoring import parse_weight_grams
+from app.services.picnic_service import product_to_scorable
+from app.services.scoring import ScorableItem, parse_weight_grams, score_basket
+from app.services.settings_store import get_effective_scoring_targets
 
 StatsRange = Literal["30d", "90d", "1y", "all"]
 
@@ -124,6 +127,7 @@ def compute_household_stats(
     prod_price_points: dict[str, list[ProductPricePoint]] = defaultdict(list)
 
     # Period grouping: weekly for <= 12 unique weeks, monthly for longer ranges
+    targets = ScoringTargets(**get_effective_scoring_targets(db))
     unique_weeks = {d.iso_week for d in deliveries}
     group_monthly = range_key in ("1y", "all") and len(unique_weeks) > 12
 
@@ -131,12 +135,11 @@ def compute_household_stats(
     period_labels: dict[str, str] = {}
     period_spend: dict[str, int] = defaultdict(int)
     period_deliveries: dict[str, int] = defaultdict(int)
-    period_scores: dict[str, list[float]] = defaultdict(list)
+    period_scorable: dict[str, list[ScorableItem]] = defaultdict(list)
 
     delivery_dates_sorted: list[datetime] = []
     delivery_totals: list[int] = []
     weekday_counts = [0] * 7
-    scores_all: list[float] = []
 
     for d in deliveries:
         dt = _as_utc(d.delivery_time)
@@ -167,6 +170,8 @@ def compute_household_stats(
             total_item_units += qty
 
             prod = products_map.get(line.picnic_id)
+            if prod is not None:
+                period_scorable[p_key].append(product_to_scorable(prod, qty, line_cents))
             bucket = prod.bucket if prod is not None else "staple"
             is_food = prod.is_food if prod is not None else (bucket != "household")
             weight_per_unit = (
@@ -214,15 +219,37 @@ def compute_household_stats(
         delivery_totals.append(effective_d_spend)
         period_spend[p_key] += effective_d_spend
         period_deliveries[p_key] += 1
-        if d.score is not None:
-            scores_all.append(float(d.score))
-            period_scores[p_key].append(float(d.score))
+
+    # Periods trend: quantity-weighted basket score per period (consistent with Dashboard trend)
+    periods: list[PeriodSpendScorePoint] = []
+    period_computed_scores: list[int] = []
+    for pk in period_order:
+        items_in_period = period_scorable.get(pk, [])
+        p_score: int | None = None
+        if items_in_period:
+            p_metrics = score_basket(items_in_period, targets=targets)
+            if p_metrics.total_food_weight_g > 0:
+                p_score = p_metrics.score
+                period_computed_scores.append(p_score)
+        periods.append(
+            PeriodSpendScorePoint(
+                period_key=pk,
+                label=period_labels[pk],
+                spend_cents=period_spend[pk],
+                delivery_count=period_deliveries[pk],
+                avg_score=p_score,
+            )
+        )
 
     # Summary metrics
     delivery_count = len(deliveries)
     avg_spend_per_delivery = round(total_spend_cents / delivery_count) if delivery_count else 0
     avg_spend_per_week = round(total_spend_cents / max(1, len(unique_weeks)))
-    avg_score = round(sum(scores_all) / len(scores_all)) if scores_all else None
+    avg_score = (
+        round(sum(period_computed_scores) / len(period_computed_scores))
+        if period_computed_scores
+        else None
+    )
 
     healthy_spend_pct = (
         round((healthy_food_spend_cents / food_spend_cents) * 100.0, 1)
@@ -268,22 +295,6 @@ def compute_household_stats(
         )
         for b, cents in sorted(bucket_spend.items(), key=lambda kv: kv[1], reverse=True)
         if cents > 0
-    ]
-
-    # Periods trend
-    periods = [
-        PeriodSpendScorePoint(
-            period_key=pk,
-            label=period_labels[pk],
-            spend_cents=period_spend[pk],
-            delivery_count=period_deliveries[pk],
-            avg_score=(
-                round(sum(period_scores[pk]) / len(period_scores[pk]))
-                if period_scores[pk]
-                else None
-            ),
-        )
-        for pk in period_order
     ]
 
     # Product stats + price changes + protein value leaders

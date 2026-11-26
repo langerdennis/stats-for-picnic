@@ -15,7 +15,7 @@ def test_healthcheck(client: TestClient) -> None:
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["demo_mode"] is True
-    assert payload["version"] == "0.2.0"
+    assert payload["version"] == "0.3.0"
 
 
 def test_demo_dashboard_deliveries_and_mealie(client: TestClient) -> None:

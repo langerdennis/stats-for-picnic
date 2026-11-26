@@ -1,6 +1,6 @@
 [project]
 name = "stats-for-picnic-backend"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-hosted grocery & recipe nutrition companion for Picnic, Mealie, and Tesserae"
 requires-python = ">=3.13"
 dependencies = [

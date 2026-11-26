@@ -60,7 +60,13 @@ def test_stats_endpoint_all_ranges_and_insights(client: TestClient) -> None:
     assert res_30.status_code == 200
     assert res_30.json()["summary"]["delivery_count"] < summary["delivery_count"]
 
-    # All-time range works cleanly
+    # All-time range works cleanly and matches Dashboard quantity-weighted weekly scores
     res_all = client.get("/api/v1/stats?range=all")
     assert res_all.status_code == 200
-    assert res_all.json()["summary"]["delivery_count"] == 8
+    stats_all = res_all.json()
+    assert stats_all["summary"]["delivery_count"] == 8
+
+    dash = client.get("/api/v1/dashboard").json()
+    dash_scores = {pt["iso_week"]: pt["score"] for pt in dash["trend_8_weeks"]}
+    stats_scores = {pt["period_key"]: pt["avg_score"] for pt in stats_all["periods"]}
+    assert stats_scores == dash_scores

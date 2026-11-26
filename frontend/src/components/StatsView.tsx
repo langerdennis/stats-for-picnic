@@ -236,9 +236,14 @@ export function StatsView({ onAddToCart, busyId }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<SortKey>('spend')
+  const [bucketFilter, setBucketFilter] = useState<string>('all')
   const [query, setQuery] = useState('')
   const [showAllProducts, setShowAllProducts] = useState(false)
   const [expandedPid, setExpandedPid] = useState<string | null>(null)
+
+  const toggleBucketFilter = (bucket: string) => {
+    setBucketFilter((cur) => (cur === bucket ? 'all' : bucket))
+  }
 
   useEffect(() => {
     let active = true
@@ -263,13 +268,17 @@ export function StatsView({ onAddToCart, busyId }: Props) {
   const filteredProducts = useMemo(() => {
     if (!stats) return []
     const needle = query.trim().toLowerCase()
-    const base = needle
-      ? stats.products.filter(
-          (p) =>
-            p.name.toLowerCase().includes(needle) ||
-            (BUCKET_LABELS[p.bucket] ?? p.bucket).toLowerCase().includes(needle),
-        )
-      : stats.products
+    const base = stats.products.filter((p) => {
+      if (bucketFilter === 'food_only' && p.bucket === 'household') return false
+      if (bucketFilter !== 'all' && bucketFilter !== 'food_only' && p.bucket !== bucketFilter) {
+        return false
+      }
+      if (!needle) return true
+      return (
+        p.name.toLowerCase().includes(needle) ||
+        (BUCKET_LABELS[p.bucket] ?? p.bucket).toLowerCase().includes(needle)
+      )
+    })
 
     const copy = [...base]
     if (sortBy === 'units') {
@@ -282,15 +291,33 @@ export function StatsView({ onAddToCart, busyId }: Props) {
       copy.sort((a, b) => b.total_spend_cents - a.total_spend_cents || b.total_units - a.total_units)
     }
     return copy
-  }, [stats, query, sortBy])
+  }, [stats, query, sortBy, bucketFilter])
 
-  const searchSummary = useMemo(() => {
-    if (!query.trim()) return null
+  const filteredPriceChanges = useMemo(() => {
+    if (!stats) return []
+    if (bucketFilter === 'all') return stats.price_changes
+    if (bucketFilter === 'food_only') {
+      return stats.price_changes.filter((pc) => pc.bucket !== 'household')
+    }
+    return stats.price_changes.filter((pc) => pc.bucket === bucketFilter)
+  }, [stats, bucketFilter])
+
+  const activeFilterSummary = useMemo(() => {
+    if (!query.trim() && bucketFilter === 'all') return null
     const cents = filteredProducts.reduce((acc, p) => acc + p.total_spend_cents, 0)
     const units = filteredProducts.reduce((acc, p) => acc + p.total_units, 0)
     const kg = filteredProducts.reduce((acc, p) => acc + p.total_weight_kg, 0)
-    return { count: filteredProducts.length, cents, units, kg }
-  }, [filteredProducts, query])
+    const labelParts: string[] = []
+    if (bucketFilter === 'food_only') {
+      labelParts.push('Nur Lebensmittel')
+    } else if (bucketFilter !== 'all') {
+      labelParts.push(BUCKET_LABELS[bucketFilter] ?? bucketFilter)
+    }
+    if (query.trim()) {
+      labelParts.push(`„${query.trim()}“`)
+    }
+    return { count: filteredProducts.length, cents, units, kg, label: labelParts.join(' · ') }
+  }, [filteredProducts, query, bucketFilter])
 
   if (loading && !stats) {
     return (
@@ -340,8 +367,11 @@ export function StatsView({ onAddToCart, busyId }: Props) {
     )
   }
 
-  const { summary, buckets, periods, price_changes, protein_value_leaders, habits } = stats
-  const visibleProducts = showAllProducts || query.trim() ? filteredProducts : filteredProducts.slice(0, 8)
+  const { summary, buckets, periods, protein_value_leaders, habits } = stats
+  const visibleProducts =
+    showAllProducts || query.trim() || bucketFilter !== 'all'
+      ? filteredProducts
+      : filteredProducts.slice(0, 8)
   const maxWeekdayCount = Math.max(1, ...habits.weekday_distribution.map((w) => w.count))
   const totalFoodAndNonFood = Math.max(1, summary.food_spend_cents + summary.non_food_spend_cents)
   const nonFoodPct = Math.round((summary.non_food_spend_cents / totalFoodAndNonFood) * 100)
@@ -434,46 +464,71 @@ export function StatsView({ onAddToCart, busyId }: Props) {
               )}
             </div>
 
-            {/* Stacked Share Bar */}
+            {/* Interactive Stacked Share Bar (click a segment to filter) */}
             <div className="h-3 w-full rounded-full overflow-hidden flex bg-[#ECEBE6]">
-              {buckets.map((b) => (
-                <div
-                  key={b.bucket}
-                  style={{
-                    width: `${Math.max(2, b.share_pct)}%`,
-                    backgroundColor: BUCKET_COLORS[b.bucket] ?? '#71717A',
-                  }}
-                  title={`${BUCKET_LABELS[b.bucket] ?? b.bucket}: ${formatEuro(b.spend_cents)} (${b.share_pct}%)`}
-                />
-              ))}
+              {buckets.map((b) => {
+                const isSelected = bucketFilter === b.bucket
+                const dimmed =
+                  bucketFilter !== 'all' &&
+                  bucketFilter !== 'food_only' &&
+                  !isSelected
+                return (
+                  <button
+                    key={b.bucket}
+                    type="button"
+                    onClick={() => toggleBucketFilter(b.bucket)}
+                    style={{
+                      width: `${Math.max(2, b.share_pct)}%`,
+                      backgroundColor: BUCKET_COLORS[b.bucket] ?? '#71717A',
+                    }}
+                    className={`h-full transition-opacity cursor-pointer ${
+                      dimmed ? 'opacity-30 hover:opacity-70' : 'opacity-100'
+                    }`}
+                    title={`${BUCKET_LABELS[b.bucket] ?? b.bucket}: ${formatEuro(b.spend_cents)} (${b.share_pct}%) – Klicken zum Filtern`}
+                  />
+                )
+              })}
             </div>
 
             <div className="divide-y divide-[#ECEBE6]">
-              {buckets.map((b) => (
-                <div
-                  key={b.bucket}
-                  className="py-2 flex items-center justify-between gap-2 text-xs"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span
-                      className="w-2.5 h-2.5 rounded-full shrink-0"
-                      style={{ backgroundColor: BUCKET_COLORS[b.bucket] ?? '#71717A' }}
-                    />
-                    <span className="font-medium text-[#18181B] truncate">
-                      {BUCKET_LABELS[b.bucket] ?? b.bucket}
-                    </span>
-                    <span className="text-zinc-400 tabular-nums shrink-0">
-                      {b.weight_kg.toFixed(1).replace('.', ',')} kg
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2.5 shrink-0 tabular-nums">
-                    <span className="text-zinc-400">{Math.round(b.share_pct)} %</span>
-                    <span className="font-semibold text-[#18181B] w-16 text-right">
-                      {formatEuro(b.spend_cents)}
-                    </span>
-                  </div>
-                </div>
-              ))}
+              {buckets.map((b) => {
+                const isSelected = bucketFilter === b.bucket
+                return (
+                  <button
+                    key={b.bucket}
+                    type="button"
+                    onClick={() => toggleBucketFilter(b.bucket)}
+                    className={`w-full py-2 px-1.5 -mx-1.5 rounded-lg flex items-center justify-between gap-2 text-xs text-left transition cursor-pointer ${
+                      isSelected
+                        ? 'bg-[#2E7D5B]/8 text-[#1F5A41]'
+                        : 'hover:bg-[#FAF9F6]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: BUCKET_COLORS[b.bucket] ?? '#71717A' }}
+                      />
+                      <span
+                        className={`truncate ${
+                          isSelected ? 'font-semibold text-[#1F5A41]' : 'font-medium text-[#18181B]'
+                        }`}
+                      >
+                        {BUCKET_LABELS[b.bucket] ?? b.bucket}
+                      </span>
+                      <span className="text-zinc-400 tabular-nums shrink-0">
+                        {b.weight_kg.toFixed(1).replace('.', ',')} kg
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2.5 shrink-0 tabular-nums">
+                      <span className="text-zinc-400">{Math.round(b.share_pct)} %</span>
+                      <span className="font-semibold text-[#18181B] w-16 text-right">
+                        {formatEuro(b.spend_cents)}
+                      </span>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           </section>
 
@@ -502,7 +557,7 @@ export function StatsView({ onAddToCart, busyId }: Props) {
           )}
         </div>
 
-        {/* Right Column: Searchable Per-Product Spending / Units / Weight Ranking */}
+        {/* Right Column: Searchable & Category-Filterable Per-Product Ranking */}
         <section className="md:col-span-6 bg-white border border-[#E5E4DF] rounded-2xl p-4 sm:p-5 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -533,6 +588,55 @@ export function StatsView({ onAddToCart, busyId }: Props) {
             </div>
           </div>
 
+          {/* Category Filter Pills (synced with left-hand category card) */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-1 px-1">
+            <button
+              type="button"
+              onClick={() => setBucketFilter('all')}
+              className={`shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium border transition cursor-pointer ${
+                bucketFilter === 'all'
+                  ? 'bg-[#18181B] text-white border-[#18181B]'
+                  : 'bg-[#FAF9F6] text-zinc-600 border-[#E5E4DF] hover:bg-zinc-100'
+              }`}
+            >
+              Alle
+            </button>
+            <button
+              type="button"
+              onClick={() => toggleBucketFilter('food_only')}
+              className={`shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium border transition cursor-pointer ${
+                bucketFilter === 'food_only'
+                  ? 'bg-[#18181B] text-white border-[#18181B]'
+                  : 'bg-[#FAF9F6] text-zinc-600 border-[#E5E4DF] hover:bg-zinc-100'
+              }`}
+            >
+              Ohne Haushalt
+            </button>
+            {buckets.map((b) => {
+              const active = bucketFilter === b.bucket
+              return (
+                <button
+                  key={`pill-${b.bucket}`}
+                  type="button"
+                  onClick={() => toggleBucketFilter(b.bucket)}
+                  className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition cursor-pointer ${
+                    active
+                      ? 'bg-[#18181B] text-white border-[#18181B]'
+                      : 'bg-[#FAF9F6] text-zinc-600 border-[#E5E4DF] hover:bg-zinc-100'
+                  }`}
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: active ? '#FFFFFF' : (BUCKET_COLORS[b.bucket] ?? '#71717A'),
+                    }}
+                  />
+                  {BUCKET_LABELS[b.bucket] ?? b.bucket}
+                </button>
+              )
+            })}
+          </div>
+
           {/* Search any food to see total spend */}
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -545,14 +649,26 @@ export function StatsView({ onAddToCart, busyId }: Props) {
             />
           </div>
 
-          {searchSummary && (
+          {activeFilterSummary && (
             <div className="px-3 py-2 rounded-xl bg-[#2E7D5B]/8 border border-[#2E7D5B]/20 flex flex-wrap items-center justify-between gap-2 text-xs text-[#1F5A41] tabular-nums">
-              <span>
-                <strong>{searchSummary.count}</strong> Treffer für „{query.trim()}“
-              </span>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="truncate">
+                  <strong>{activeFilterSummary.count}</strong> Treffer ({activeFilterSummary.label})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBucketFilter('all')
+                    setQuery('')
+                  }}
+                  className="text-[11px] underline text-[#2E7D5B] hover:text-[#1F5A41] shrink-0 cursor-pointer"
+                >
+                  Zurücksetzen
+                </button>
+              </div>
               <span className="font-semibold">
-                {formatEuro(searchSummary.cents)} · {searchSummary.units}× ·{' '}
-                {searchSummary.kg.toFixed(1).replace('.', ',')} kg
+                {formatEuro(activeFilterSummary.cents)} · {activeFilterSummary.units}× ·{' '}
+                {activeFilterSummary.kg.toFixed(1).replace('.', ',')} kg
               </span>
             </div>
           )}
@@ -655,7 +771,7 @@ export function StatsView({ onAddToCart, busyId }: Props) {
             )}
           </div>
 
-          {!query.trim() && filteredProducts.length > 8 && (
+          {!query.trim() && bucketFilter === 'all' && filteredProducts.length > 8 && (
             <button
               type="button"
               onClick={() => setShowAllProducts((v) => !v)}
@@ -680,17 +796,26 @@ export function StatsView({ onAddToCart, busyId }: Props) {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* 1) Price Tracker / Picnic Inflation */}
         <section className="bg-white border border-[#E5E4DF] rounded-2xl p-4 sm:p-5 space-y-3">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-[#D97706]" />
-            <h3 className="text-sm font-semibold text-[#18181B]">Preisänderungen</h3>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[#D97706]" />
+              <h3 className="text-sm font-semibold text-[#18181B]">Preisänderungen</h3>
+            </div>
+            {bucketFilter !== 'all' && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#FAF9F6] border border-[#E5E4DF] text-zinc-500">
+                {bucketFilter === 'food_only'
+                  ? 'Ohne Haushalt'
+                  : (BUCKET_LABELS[bucketFilter] ?? bucketFilter)}
+              </span>
+            )}
           </div>
-          {price_changes.length === 0 ? (
+          {filteredPriceChanges.length === 0 ? (
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Noch keine nennenswerten Stückpreis-Änderungen (≥ 3 %) im gewählten Zeitraum erkannt.
+              Keine nennenswerten Stückpreis-Änderungen (≥ 3 %) in dieser Auswahl.
             </p>
           ) : (
             <div className="divide-y divide-[#ECEBE6]">
-              {price_changes.slice(0, 5).map((pc) => {
+              {filteredPriceChanges.slice(0, 5).map((pc) => {
                 const up = pc.delta_cents > 0
                 return (
                   <div key={pc.picnic_id} className="py-2 flex items-center justify-between gap-2">

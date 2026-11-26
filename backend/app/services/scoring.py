@@ -349,11 +349,32 @@ def score_basket(
     )
     final_score = round(_clamp(combined))
 
-    pos_candidates.sort(key=lambda pair: pair[0], reverse=True)
-    neg_candidates.sort(key=lambda pair: pair[0], reverse=True)
+    def _merge_driver_candidates(
+        candidates: list[tuple[float, ScoreDriver]],
+    ) -> list[tuple[float, ScoreDriver]]:
+        merged: dict[str, tuple[float, ScoreDriver]] = {}
+        for rank, drv in candidates:
+            key = drv.name.strip().lower() or drv.picnic_id
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = (rank, drv)
+            else:
+                prev_rank, prev_drv = existing
+                merged[key] = (
+                    prev_rank + rank,
+                    prev_drv.model_copy(
+                        update={"weight_g": round(prev_drv.weight_g + drv.weight_g, 1)}
+                    ),
+                )
+        result = list(merged.values())
+        result.sort(key=lambda pair: pair[0], reverse=True)
+        return result
 
-    positive_drivers = [drv for _, drv in pos_candidates[:3]]
-    negative_drivers = [drv for _, drv in neg_candidates[:3]]
+    pos_merged = _merge_driver_candidates(pos_candidates)
+    neg_merged = _merge_driver_candidates(neg_candidates)
+
+    positive_drivers = [drv for _, drv in pos_merged[:3]]
+    negative_drivers = [drv for _, drv in neg_merged[:3]]
 
     insight_text = _build_insight_text(
         final_score,

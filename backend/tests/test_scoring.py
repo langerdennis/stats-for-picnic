@@ -195,3 +195,23 @@ def test_pantry_oil_cap_custom_targets_and_remove_wins() -> None:
     assert rem_wins[0].score_delta > 0
 
 
+def test_duplicate_items_merge_into_single_driver() -> None:
+    items = [
+        _item("c1", "Frische Möhren", bucket="produce", weight_g=500, kcal=41, protein=0.9, sugar=4.7, nova=1),
+        _item("c2", "Frische Möhren", bucket="produce", weight_g=500, kcal=41, protein=0.9, sugar=4.7, nova=1),
+        _item("skyr", "Skyr Natur", bucket="protein", weight_g=500, kcal=63, protein=11, sugar=4, nova=1),
+        _item("ch1", "Kartoffelchips", bucket="treat_snack", weight_g=175, kcal=536, protein=6, sugar=3, nova=4),
+        _item("ch1", "Kartoffelchips", bucket="treat_snack", weight_g=175, kcal=536, protein=6, sugar=3, nova=4),
+    ]
+    res = score_basket(items)
+    pos_names = [d.name for d in res.positive_drivers]
+    assert pos_names.count("Frische Möhren") == 1
+    carrots = next(d for d in res.positive_drivers if d.name == "Frische Möhren")
+    assert carrots.weight_g == 1000.0
+
+    neg_names = [d.name for d in res.negative_drivers]
+    assert neg_names.count("Kartoffelchips") == 1
+    chips = next(d for d in res.negative_drivers if d.name == "Kartoffelchips")
+    assert chips.weight_g == 350.0
+
+

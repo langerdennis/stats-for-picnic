@@ -153,7 +153,7 @@ class LLMRecipeScoreResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     demo_mode: bool = False
-    version: str = "0.2.0"
+    version: str = "0.3.0"
 
 
 class ProductOut(BaseModel):
